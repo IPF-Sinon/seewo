@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>希沃屏保配置工具</title>
+<!-- 纯原生实现，无任何外部 CDN 依赖（用户环境可能无外网） -->
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+
+<!-- ===================== 顶部状态条 ===================== -->
+<header class="statusbar" id="statusbar">
+  <div class="statusbar__brand">
+    <span class="statusbar__logo" aria-hidden="true">屏</span>
+    <span class="statusbar__title">希沃屏保配置工具</span>
+  </div>
+
+  <div class="statusbar__items" role="status" aria-live="polite">
+    <div class="statusitems" id="statusPillInjected" data-state="unknown" title="app.asar 是否已注入本工具的挂钩">
+      <span class="dot" aria-hidden="true"></span>
+      <span class="statusitems__label">注入状态</span>
+      <span class="statusitems__value" id="txtInjected">检测中…</span>
+    </div>
+    <div class="statusitems" id="statusPillEffective" data-state="unknown" title="配置文件是否存在且通过校验">
+      <span class="dot" aria-hidden="true"></span>
+      <span class="statusitems__label">配置</span>
+      <span class="statusitems__value" id="txtEffective">检测中…</span>
+    </div>
+    <div class="statusitems" id="statusPillSwitch" data-state="unknown" title="当前「启用屏保」开关状态">
+      <span class="dot" aria-hidden="true"></span>
+      <span class="statusitems__label">屏保开关</span>
+      <span class="statusitems__value" id="txtSwitch">检测中…</span>
+    </div>
+    <div class="statusitems" id="statusPillDirty" data-state="clean" title="界面是否有未保存的改动">
+      <span class="dot" aria-hidden="true"></span>
+      <span class="statusitems__label">改动</span>
+      <span class="statusitems__value" id="txtDirty">已同步</span>
+    </div>
+  </div>
+
+  <div class="statusbar__actions">
+    <button type="button" class="btn btn--ghost" id="btnRefresh" title="重新读取后端状态与配置">刷新</button>
+  </div>
+</header>
+
+<!-- ===================== 全局提示条 ===================== -->
+<div class="alerts" id="alerts" aria-live="assertive"></div>
+
+<main class="wrap">
+
+  <!-- ===================== 主开关区（醒目） ===================== -->
+  <section class="card card--hero" aria-labelledby="hMaster">
+    <h2 class="card__title" id="hMaster">主开关</h2>
+
+    <div class="hero">
+      <div class="hero__switches">
+        <label class="switch">
+          <input type="checkbox" id="screensaverEnabled">
+          <span class="switch__track" aria-hidden="true"><span class="switch__thumb"></span></span>
+          <span class="switch__text">
+            <span class="switch__name">启用屏保</span>
+            <span class="switch__hint">关闭后，集控下发的屏保将不再弹出（推荐：不要屏保就关掉它）</span>
+          </span>
+        </label>
+
+        <label class="switch" style="margin-top:14px">
+          <input type="checkbox" id="lockCascadeOnClose">
+          <span class="switch__track" aria-hidden="true"><span class="switch__thumb"></span></span>
+          <span class="switch__text">
+            <span class="switch__name">关闭屏保后自动锁屏</span>
+            <span class="switch__hint">开启后，屏保窗口关闭时会连带进入屏幕锁；默认关闭（不打扰）</span>
+          </span>
+        </label>
+      </div>
+
+      <div class="hero__preview">
+        <button type="button" class="btn btn--preview" id="btnPreview">
+          <span class="btn--preview__icon" aria-hidden="true">▶</span>
+          <span class="btn--preview__text">立即预览屏保</span>
+          <span class="btn--preview__sub">唤起一次，方便当面确认效果</span>
+        </button>
+        <p class="hero__note" id="previewNote">
+          预览需要「注入已生效」且「启用屏保」为开。真机验证前仅生成请求，不会强行弹窗。
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== 深度配置区 ===================== -->
+  <section class="card" aria-labelledby="hDeep">
+    <h2 class="card__title" id="hDeep">
+      深度配置
+      <span class="card__sub">自定义图集与文案；留空的自定义项不会覆盖云端下发数据</span>
+    </h2>
+
+    <!-- 总开关：是否启用自定义图集（对应 override 为 null） -->
+    <div class="row row--override" id="rowOverrideEnable">
+      <label class="switch switch--sm">
+        <input type="checkbox" id="overrideEnabled">
+        <span class="switch__track" aria-hidden="true"><span class="switch__thumb"></span></span>
+        <span class="switch__text">
+          <span class="switch__name">启用自定义图集</span>
+          <span class="switch__hint">关闭 = override 置为 null，完全沿用云端下发的图片与文案</span>
+        </span>
+      </label>
+    </div>
+
+    <fieldset class="fieldset" id="overrideFields">
+
+      <div class="row">
+        <label class="field">
+          <span class="field__label">素材来源</span>
+          <input type="text" id="materialSource" data-field="materialSource"
+                 placeholder="例如：我的班级 / 希沃集控" autocomplete="off">
+          <span class="field__hint">屏保底部的「素材来自 XXX」署名；留空则不显示</span>
+          <span class="field__error" data-error-for="materialSource"></span>
+        </label>
+
+        <label class="field field--narrow">
+          <span class="field__label">切换间隔</span>
+          <span class="field__inline">
+            <input type="number" id="switchInterval" data-field="switchInterval"
+                   min="1" step="1" inputmode="numeric" placeholder="15">
+            <span class="field__unit">秒</span>
+          </span>
+          <span class="field__hint">正整数（秒）。渲染器内部会 ×1000，非法值会被后端拒绝</span>
+          <span class="field__error" data-error-for="switchInterval"></span>
+        </label>
+      </div>
+
+      <div class="row">
+        <div class="field field--full">
+          <span class="field__label">图片适配</span>
+          <div class="radios" role="radiogroup" aria-label="图片适配方式" id="pictureSizeTypeGroup">
+            <label class="radio">
+              <input type="radio" name="pictureSizeType" value="0">
+              <span class="radio__box" aria-hidden="true"></span>
+              <span class="radio__text">
+                <span class="radio__name">contain（留边完整显示）</span>
+                <span class="radio__hint">整图缩放，不足处留黑边，图片不会被裁掉</span>
+              </span>
+            </label>
+            <label class="radio">
+              <input type="radio" name="pictureSizeType" value="1">
+              <span class="radio__box" aria-hidden="true"></span>
+              <span class="radio__text">
+                <span class="radio__name">cover（裁剪铺满）</span>
+                <span class="radio__hint">铺满整屏，超出部分被裁掉，画面更饱满</span>
+              </span>
+            </label>
+          </div>
+          <span class="field__error" data-error-for="pictureSizeType"></span>
+        </div>
+      </div>
+
+      <!-- ---- 图片列表 ---- -->
+      <div class="subsection" id="sectionImages">
+        <div class="subsection__head">
+          <h3 class="subsection__title">
+            图片列表
+            <span class="chip" id="imageCountChip">0 张</span>
+          </h3>
+          <div class="subsection__tools">
+            <button type="button" class="btn btn--sm" id="btnImageTransition">按图片数对齐转场</button>
+            <button type="button" class="btn btn--sm btn--primary" id="btnAddImage">+ 添加图片</button>
+          </div>
+        </div>
+        <p class="subsection__desc">本机图片的绝对路径，例如 <code>C:\\图片\\1.jpg</code>。列表顺序 = 轮播顺序。</p>
+        <ul class="list" id="imageList"></ul>
+        <p class="list__empty" id="imageEmpty">尚未添加图片。留空则不覆盖云端图片。</p>
+        <span class="field__error field__error--block" data-error-for="imageList"></span>
+      </div>
+
+      <!-- ---- 图文条目 ---- -->
+      <div class="subsection" id="sectionTexts">
+        <div class="subsection__head">
+          <h3 class="subsection__title">
+            图文条目
+            <span class="chip" id="textCountChip">0 条</span>
+          </h3>
+          <div class="subsection__tools">
+            <button type="button" class="btn btn--sm btn--primary" id="btnAddText">+ 添加条目</button>
+          </div>
+        </div>
+        <p class="subsection__desc">屏保上叠加显示的文字，含正文与可选的出处。正文为必填。</p>
+        <ul class="list" id="textList"></ul>
+        <p class="list__empty" id="textEmpty">尚未添加图文条目。</p>
+        <span class="field__error field__error--block" data-error-for="textList"></span>
+      </div>
+
+      <!-- ---- 转场列表 ---- -->
+      <div class="subsection" id="sectionTransitions">
+        <div class="subsection__head">
+          <h3 class="subsection__title">
+            转场列表
+            <span class="chip chip--warn" id="transitionStateChip">未启用（随机）</span>
+          </h3>
+          <div class="subsection__tools">
+            <button type="button" class="btn btn--sm" id="btnTransitionEnable">改为手动指定</button>
+            <button type="button" class="btn btn--sm" id="btnTransitionRandom" hidden>改回随机</button>
+            <button type="button" class="btn btn--sm" id="btnTransitionFill">填充随机值</button>
+            <button type="button" class="btn btn--sm" id="btnTransitionReset">全部置 0</button>
+          </div>
+        </div>
+        <p class="subsection__desc">
+          可选。转场编号 <strong>0..6</strong>，且<strong>长度必须等于图片数量</strong>（当前图片数：<span id="transitionNeedCount">0</span>）。
+          不填 = 由注入层按官方算法随机生成。
+        </p>
+        <div class="transition-grid" id="transitionList"></div>
+        <p class="list__empty" id="transitionEmpty">未手动指定转场（随机）。</p>
+        <span class="field__error field__error--block" data-error-for="transitionList"></span>
+      </div>
+
+    </fieldset>
+  </section>
+
+  <!-- ===================== 高级项（次要，默认折叠） ===================== -->
+  <section class="card" aria-labelledby="hAdv">
+    <h2 class="card__title card__title--toggle" id="hAdv">
+      <button type="button" class="disclosure" id="btnAdvToggle" aria-expanded="false" aria-controls="advBody">
+        <span class="disclosure__caret" aria-hidden="true">▸</span>
+        高级选项
+      </button>
+    </h2>
+    <div class="advbody" id="advBody" hidden>
+      <div class="row">
+        <label class="field">
+          <span class="field__label">日志级别</span>
+          <select id="logLevel">
+            <option value="debug">debug（最详细）</option>
+            <option value="info">info（推荐）</option>
+            <option value="warn">warn</option>
+            <option value="error">error</option>
+            <option value="silent">silent（关闭日志）</option>
+          </select>
+          <span class="field__hint">写入 aura-screensaver.log 的详细程度</span>
+          <span class="field__error" data-error-for="logLevel"></span>
+        </label>
+
+        <label class="field field--narrow">
+          <span class="field__label">配置备份份数</span>
+          <input type="number" id="backupCount" data-field="backupCount" min="1" step="1" inputmode="numeric">
+          <span class="field__hint">每次保存后保留的历史备份数量（正整数）</span>
+          <span class="field__error" data-error-for="backupCount"></span>
+        </label>
+      </div>
+
+      <div class="row">
+        <label class="switch switch--sm">
+          <input type="checkbox" id="allowManualClose">
+          <span class="switch__track" aria-hidden="true"><span class="switch__thumb"></span></span>
+          <span class="switch__text">
+            <span class="switch__name">允许手动关闭屏保</span>
+            <span class="switch__hint">点击屏保画面即视为正常关闭，不触发额外行为</span>
+          </span>
+        </label>
+      </div>
+
+      <div class="row">
+        <div class="field field--full">
+          <span class="field__label">配置文件位置</span>
+          <code class="pathbox" id="configPath">—</code>
+          <span class="field__hint">修改后需重启希沃管家生效（无需重新注入）</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<!-- ===================== 底部操作栏 ===================== -->
+<footer class="actionbar" id="actionbar">
+  <div class="actionbar__left">
+    <span class="actionbar__hint" id="actionHint">就绪</span>
+  </div>
+  <div class="actionbar__right">
+    <button type="button" class="btn" id="btnLog">查看日志</button>
+    <button type="button" class="btn" id="btnBackups">备份列表</button>
+    <button type="button" class="btn btn--danger" id="btnReset">恢复默认</button>
+    <button type="button" class="btn btn--primary btn--save" id="btnSave">保存配置</button>
+  </div>
+</footer>
+
+<!-- ===================== 日志抽屉 ===================== -->
+<div class="drawer" id="logDrawer" hidden>
+  <div class="drawer__head">
+    <h3 class="drawer__title">运行日志</h3>
+    <div class="drawer__tools">
+      <label class="drawer__lines">
+        行数
+        <select id="logLines">
+          <option value="100">100</option>
+          <option value="300" selected>300</option>
+          <option value="1000">1000</option>
+        </select>
+      </label>
+      <button type="button" class="btn btn--sm" id="btnLogReload">重新加载</button>
+      <button type="button" class="btn btn--sm" id="btnLogClose">关闭</button>
+    </div>
+  </div>
+  <p class="drawer__path" id="logPath">—</p>
+  <pre class="drawer__body" id="logBody">（未加载）</pre>
+</div>
+
+<!-- ===================== 备份抽屉 ===================== -->
+<div class="drawer" id="backupDrawer" hidden>
+  <div class="drawer__head">
+    <h3 class="drawer__title">配置备份</h3>
+    <div class="drawer__tools">
+      <button type="button" class="btn btn--sm" id="btnBackupReload">重新加载</button>
+      <button type="button" class="btn btn--sm" id="btnBackupClose">关闭</button>
+    </div>
+  </div>
+  <p class="drawer__path" id="backupPath">—</p>
+  <div class="drawer__body" id="backupBody">（未加载）</div>
+</div>
+
+<script src="./app.js"></script>
+</body>
+</html>
