@@ -699,10 +699,89 @@ function Stop-HostForce {
     }
     return $true
 }
+# ---------------------------------------------------------------------------
+# 希沃自我保护探测
+#   ACL 明明给了 BUILTIN\Administrators (F) 完全控制，却连 takeown 都被拒绝，
+#   说明写入是被内核过滤驱动拦掉的（常见于防篡改设计），不是普通权限问题。
+# ---------------------------------------------------------------------------
+
+function Add-ProtectionFacts {
+    Add-Log '--- 希沃相关服务 ---'
+    $found = 0
+    try {
+        $svcList = @(Get-CimInstance Win32_Service -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '(?i)seewo' -or $_.DisplayName -match '希沃|Seewo' })
+        foreach ($s in $svcList) {
+            $found++
+            Add-Log ('服务: ' + $s.Name + ' | ' + $s.DisplayName + ' | 状态=' + $s.State + ' | 启动=' + $s.StartMode + ' | ' + $s.PathName)
+        }
+        if ($found -eq 0) { Add-Log '未发现希沃相关服务' }
+    } catch { Add-Log ('枚举服务失败: ' + $_.Exception.Message) }
+
+    Add-Log '--- 疑似希沃驱动 ---'
+    try {
+        $all = & sc.exe query type= driver state= all 2>&1 | Out-String
+        $hits = @($all -split '\r?\n' | Where-Object { $_ -match '(?i)seewo' })
+        if ($hits.Count -eq 0) {
+            Add-Log '驱动列表中未出现 seewo 字样（保护可能由进程自身或其它驱动持有）'
+        } else {
+            foreach ($line in $hits) { Add-Log ('  ' + $line.Trim()) }
+        }
+    } catch { Add-Log ('枚举驱动失败: ' + $_.Exception.Message) }
+}
+
+function Try-StopProtection {
+    $stopped = @()
+    try {
+        $svcList = @(Get-Service -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '(?i)seewo' -or $_.DisplayName -match '希沃|Seewo' })
+        foreach ($s in $svcList) {
+            if ([string]$s.Status -eq 'Stopped') { continue }
+            try {
+                Add-Log ('尝试停止服务: ' + $s.Name)
+                Stop-Service -Name $s.Name -Force -ErrorAction Stop
+                $stopped += $s.Name
+                Add-Log ('已停止: ' + $s.Name)
+            } catch { Add-Log ('停止失败 ' + $s.Name + ': ' + $_.Exception.Message) }
+        }
+    } catch { Add-Log ('停止服务异常: ' + $_.Exception.Message) }
+    Start-Sleep -Seconds 1
+    return ,$stopped
+}
+
+function Restore-Protection {
+    param($Names)
+    if (-not $Names) { return }
+    foreach ($n in @($Names)) {
+        try {
+            Add-Log ('恢复启动服务: ' + $n)
+            Start-Service -Name $n -ErrorAction Stop
+        } catch { Add-Log ('恢复失败 ' + $n + ': ' + $_.Exception.Message) }
+    }
+}
+
+# 把打好补丁的 app.asar 导出到桌面，供保护无法解除时手动替换
+function Export-PatchedAsar {
+    param([byte[]]$Bytes)
+    try {
+        $desktop = [Environment]::GetFolderPath('Desktop')
+        if (-not $desktop) { $desktop = $env:USERPROFILE }
+        $name = 'app.asar.injected-' + (Get-Date).ToString('yyyyMMdd-HHmmss')
+        $target = Join-Path $desktop $name
+        [System.IO.File]::WriteAllBytes($target, $Bytes)
+        Add-Log ('已导出补丁文件: ' + $target)
+        return $target
+    } catch {
+        Add-Log ('导出失败: ' + $_.Exception.Message)
+        return $null
+    }
+}
 
 # ---------------------------------------------------------------------------
-# 一键安装（原子写入 + 详细日志）
+# 一键安装（先只读生成并校验，再决定写哪里；原子替换）
 # ---------------------------------------------------------------------------
+
+$script:PendingRestore = @()
 
 $btnInstall.add_Click({
     Initialize-InstallerLog
@@ -717,7 +796,9 @@ $btnInstall.add_Click({
     }
 
     $btnInstall.Enabled = $false
+    $stageDir = $null
     try {
+        # ---------- 1. 定位 ----------
         Set-Status '正在定位希沃管家…'
         $dir = Resolve-SeewoDirEmbedded
         Add-Log ('安装目录: ' + $dir)
@@ -732,28 +813,8 @@ $btnInstall.add_Click({
         $resourcesDir = Join-Path $dir 'resources'
         $asar = Join-Path $resourcesDir 'app.asar'
         $bak = $asar + '.bak'
-        $tmpNew = $asar + '.new'
 
-        Set-Status '正在检查写权限…'
-        if (-not (Test-DirWritable -Dir $resourcesDir)) {
-            Add-Log '目录不可写，尝试修复 ACL'
-            Set-Status '权限不足，正在尝试修复…'
-            if (-not (Try-RepairAcl -Dir $resourcesDir)) {
-                throw ('没有写入权限，且自动修复失败。' + $script:NL + $script:NL +
-                    '目标目录：' + $resourcesDir + $script:NL + $script:NL +
-                    '常见原因：' + $script:NL +
-                    '  1) 杀毒软件 /「受控文件夹访问」拦截（优先排查）' + $script:NL +
-                    '  2) 希沃自我保护驱动阻止第三方写入' + $script:NL +
-                    '  3) 目录 ACL 被设为只读' + $script:NL + $script:NL +
-                    '详细诊断已写入日志，请把日志发我。')
-            }
-            Add-Log 'ACL 修复后已可写'
-        }
-
-        Set-Status '正在结束希沃管家…'
-        $stopped = Stop-HostForce
-        if (-not $stopped) { Add-Log '警告：管家仍在运行，继续尝试写入' }
-
+        # ---------- 2. 读 + 生成（只读，不需要写权限） ----------
         Set-Status '正在生成注入代码…'
         $info = Read-AsarHeader $asar
         $leaves = Get-AsarLeaves $info.Header
@@ -762,68 +823,126 @@ $btnInstall.add_Click({
         if ($null -eq $mainLeaf) { throw '这个 app.asar 里没有 main.js' }
 
         $mainText = [System.Text.Encoding]::UTF8.GetString((Get-EntryBytes $info $mainLeaf))
-        $alreadyInjected = $mainText.Contains($script:MarkBegin)
-        Add-Log ('已注入过: ' + $alreadyInjected)
-
-        if ($alreadyInjected) {
-            $patchText = $mainText
-        } else {
-            $res = Get-PatchedMainJs -Source $mainText -LoaderText $script:LoaderText -ConfigJson $script:DefaultConfigJson
-            $patchText = $res.Text
-            Add-Log ('注入点 @' + $res.AnchorIndex + ' 入口模块 id=' + $res.EntryId + ' 增加 ' + $res.DeltaLength + ' 字符')
+        if ($mainText.Contains($script:MarkBegin)) {
+            Add-Log 'app.asar 已经是注入状态'
+            Refresh-UiState -Full
+            [System.Windows.Forms.MessageBox]::Show('该 app.asar 已经是注入状态，无需重复安装。', '已注入', 'OK', 'Information') | Out-Null
+            return
         }
 
-        Set-Status '正在写入新文件（原子替换）…'
-        $newBytes = [System.Text.Encoding]::UTF8.GetBytes($patchText)
-        [System.IO.File]::WriteAllBytes($tmpNew, $newBytes)
-        Add-Log ('已写入临时文件: ' + $tmpNew + ' (' + $newBytes.Length + ' 字节)')
+        $res = Get-PatchedMainJs -Source $mainText -LoaderText $script:LoaderText -ConfigJson $script:DefaultConfigJson
+        Add-Log ('注入点 @' + $res.AnchorIndex + ' 入口 id=' + $res.EntryId + ' 增加 ' + $res.DeltaLength + ' 字符')
+        $newBytes = [System.Text.Encoding]::UTF8.GetBytes($res.Text)
 
-        # 校验临时文件：能解析且含注入标记
-        $vInfo = Read-AsarHeader $tmpNew
+        # ---------- 2b. 在 %TEMP% 暂存并校验 ----------
+        $stageDir = Join-Path $env:TEMP ('aura-stage-' + [System.Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
+        $staged = Join-Path $stageDir 'app.asar'
+        [System.IO.File]::WriteAllBytes($staged, $newBytes)
+
+        $vInfo = Read-AsarHeader $staged
         $vLeaves = Get-AsarLeaves $vInfo.Header
         $vMain = $null
         foreach ($l in $vLeaves) { if ($l.Rel -eq 'main.js') { $vMain = $l } }
         $vText = [System.Text.Encoding]::UTF8.GetString((Get-EntryBytes $vInfo $vMain))
-        if (-not $vText.Contains($script:MarkBegin)) {
-            Remove-Item -LiteralPath $tmpNew -Force -ErrorAction SilentlyContinue
-            throw '临时文件校验失败：没有注入标记'
-        }
-        Add-Log ('临时文件校验通过，条目数=' + $vLeaves.Count)
+        if (-not $vText.Contains($script:MarkBegin)) { throw '暂存文件校验失败：没有注入标记' }
+        Add-Log ('暂存校验通过: 条目数=' + $vLeaves.Count + '，大小=' + $newBytes.Length)
 
-        # 备份：优先重命名（快且原子），失败则复制
+        # ---------- 3. 写权限 ----------
+        Set-Status '正在检查写权限…'
+        $writable = Test-DirWritable -Dir $resourcesDir
+
+        if (-not $writable) {
+            Add-Log '目录不可写。注意：ACL 中 Administrators 已有(F)，说明是保护驱动在拦截'
+            $writable = Try-RepairAcl -Dir $resourcesDir
+        }
+
+        if (-not $writable) {
+            Add-ProtectionFacts
+            $ans = [System.Windows.Forms.MessageBox]::Show(
+                ('写入被希沃的自我保护拦截了。' + $script:NL + $script:NL +
+                 '证据：该目录 ACL 里 BUILTIN\Administrators 已是「完全控制」，' + $script:NL +
+                 '但连 takeown / icacls 都被拒绝 —— 这是内核级过滤驱动的行为，' + $script:NL +
+                 '不是普通权限问题。' + $script:NL + $script:NL +
+                 '是否尝试【临时停止希沃相关服务】后再写？' + $script:NL +
+                 '（结束后会自动恢复启动；极小概率导致管家暂时不可用）'),
+                '检测到自我保护', 'OKCancel', 'Warning')
+            if ($ans -eq 'OK') {
+                Set-Status '正在尝试停止希沃保护服务…'
+                $script:PendingRestore = Try-StopProtection
+                $writable = Test-DirWritable -Dir $resourcesDir
+                Add-Log ('停止服务后是否可写: ' + $writable)
+            }
+        }
+
+        # ---------- 4. 仍不可写 → 导出保底 ----------
+        if (-not $writable) {
+            Add-Log '仍不可写，改为导出补丁文件'
+            $exported = Export-PatchedAsar -Bytes $newBytes
+            Refresh-UiState -Full
+            if ($exported) {
+                [System.Windows.Forms.MessageBox]::Show(
+                    ('无法直接写入（希沃自我保护已开启），已把打好补丁的文件导出到桌面：' + $script:NL + $exported + $script:NL + $script:NL +
+                     '可选的绕过办法：' + $script:NL +
+                     '  1) 托盘退出希沃 + 结束所有希沃进程后重试' + $script:NL +
+                     '  2) 重启进「安全模式」，把桌面那个文件覆盖到：' + $script:NL +
+                     '     ' + $asar + $script:NL +
+                     '     （覆盖前先备份原文件）' + $script:NL +
+                     '  3) 请管理员临时关闭希沃自我保护' + $script:NL + $script:NL +
+                     '详细诊断见日志：' + $script:NL + $script:InstallLog),
+                    '已导出补丁文件', 'OK', 'Warning') | Out-Null
+            } else {
+                [System.Windows.Forms.MessageBox]::Show(
+                    ('无法写入，也无法导出文件。请把日志发我：' + $script:NL + $script:InstallLog),
+                    '安装失败', 'OK', 'Error') | Out-Null
+            }
+            return
+        }
+
+        # ---------- 5. 停管家 ----------
+        Set-Status '正在结束希沃管家…'
+        $stopped = Stop-HostForce
+        if (-not $stopped) { Add-Log '警告：管家仍在运行，继续尝试写入' }
+
+        # ---------- 6. 备份 + 原子替换 ----------
+        Set-Status '正在写入（原子替换）…'
+        $tmpNew = $asar + '.new'
+        Copy-Item -LiteralPath $staged -Destination $tmpNew -Force -ErrorAction Stop
+        Add-Log '已写入同目录临时文件 app.asar.new'
+
         if (-not (Test-Path -LiteralPath $bak)) {
             try {
                 Move-Item -LiteralPath $asar -Destination $bak -ErrorAction Stop
-                Add-Log '备份方式：重命名 app.asar -> app.asar.bak'
+                Add-Log '备份：重命名 app.asar -> app.asar.bak'
             } catch {
                 Add-Log ('重命名备份失败，改用复制: ' + $_.Exception.Message)
                 Copy-Item -LiteralPath $asar -Destination $bak -Force -ErrorAction Stop
-                Add-Log '备份方式：复制'
+                Add-Log '备份：复制'
             }
         } else {
             Add-Log '已存在备份，保留不覆盖'
         }
 
-        # 原子替换
         try {
             if (Test-Path -LiteralPath $asar) {
                 [System.IO.File]::Replace($tmpNew, $asar, $null)
                 Add-Log '原子替换成功 (File.Replace)'
             } else {
                 Move-Item -LiteralPath $tmpNew -Destination $asar -Force -ErrorAction Stop
-                Add-Log '原文件已重命名为备份，直接移入新文件'
+                Add-Log '移入新文件（原文件已作为备份）'
             }
         } catch {
             Add-Log ('原子替换失败: ' + $_.Exception.Message)
             if (Test-Path -LiteralPath $bak) {
                 Copy-Item -LiteralPath $bak -Destination $asar -Force -ErrorAction SilentlyContinue
-                Add-Log '已从备份回滚 app.asar'
+                Add-Log '已从备份回滚'
             }
             throw
         } finally {
             Remove-Item -LiteralPath $tmpNew -Force -ErrorAction SilentlyContinue
         }
 
+        # ---------- 7. 重启 + 确认 ----------
         Set-Status '正在重启希沃管家…'
         if (Test-Path -LiteralPath $script:LogPath) {
             Remove-Item -LiteralPath $script:LogPath -Force -ErrorAction SilentlyContinue
@@ -858,7 +977,6 @@ $btnInstall.add_Click({
             if (-not $started) { $extra = $script:NL + $script:NL + '注意：没能自动启动希沃管家，请手动打开。' }
             [System.Windows.Forms.MessageBox]::Show(
                 ('app.asar 已注入成功，但暂时没在日志里看到加载器就绪。' + $extra + $script:NL + $script:NL +
-                 '可能原因：管家启动较慢，或注入未生效。' + $script:NL +
                  '稍后点「查看日志」，看到「命令桥已启动」就说明正常。'),
                 '已写入，等待加载器', 'OK', 'Warning') | Out-Null
         }
@@ -869,11 +987,17 @@ $btnInstall.add_Click({
         try { Add-Log ('调用栈: ' + $_.ScriptStackTrace) } catch { }
         Refresh-UiState -Full
         $logHint = $script:InstallLog
-        if (-not $logHint) { $logHint = '(日志文件不可用)' }
+        if (-not $logHint) { $logHint = '(日志不可用)' }
         $msg = '安装失败：' + $_.Exception.Message + $script:NL + $script:NL + '详细日志：' + $script:NL + $logHint
         if ($script:ExeLog) { $msg = $msg + $script:NL + $script:ExeLog }
         [System.Windows.Forms.MessageBox]::Show($msg, '安装失败', 'OK', 'Error') | Out-Null
     } finally {
+        if ($stageDir) { Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction SilentlyContinue }
+        if ($script:PendingRestore -and @($script:PendingRestore).Count -gt 0) {
+            Add-Log '恢复希沃服务…'
+            Restore-Protection -Names $script:PendingRestore
+            $script:PendingRestore = @()
+        }
         $btnInstall.Enabled = $true
     }
 })
