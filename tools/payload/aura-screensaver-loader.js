@@ -664,6 +664,64 @@
   }
 
   /* ------------------------------------------------------------------ *
+   * 模块定位（思路参考 HugoAura：模块 id 是 webpack 构建产物，换版本会漂移）
+   *
+   *   先试已知 id（本版为 120 / 69）；形状不符就按**工厂源码特征**扫描模块表，
+   *   逐个验证形状后才采用。
+   *   ★ 先按源码过滤再执行工厂 —— 避免为探测触发无关模块的副作用。
+   * ------------------------------------------------------------------ */
+
+  function getFactorySource(req, id) {
+    try {
+      var m = req.m;
+      if (!m) return '';
+      var f = m[id];
+      return (typeof f === 'function') ? String(f) : '';
+    } catch (e) { return ''; }
+  }
+
+  function looksLikeScreensaver(v) {
+    return !!(v && typeof v.onMessage === 'function' && typeof v.startScreensaver === 'function');
+  }
+
+  function looksLikeWindowManager(v) {
+    return !!(v && typeof v.newWindow === 'function' && typeof v.closeWindow === 'function');
+  }
+
+  function resolveByScan(req, needle, validator, log, label) {
+    try {
+      var m = req.m;
+      if (!m || typeof m !== 'object') { log.warn(label + '：模块表不可用，无法扫描'); return null; }
+      var ids = Object.keys(m);
+      for (var i = 0; i < ids.length; i++) {
+        var id = ids[i];
+        var src = getFactorySource(req, id);
+        if (!src || src.indexOf(needle) === -1) continue;
+        var cand = null;
+        try { cand = req(Number(id)); } catch (e) { continue; }
+        if (validator(cand)) {
+          log.info(label + '：按特征命中模块 ' + id);
+          return cand;
+        }
+      }
+    } catch (e) { log.warn(label + '扫描异常: ' + (e && e.message || e)); }
+    return null;
+  }
+
+  function resolveController(req, log) {
+    var c = null;
+    try { c = req(120); } catch (e) { }
+    if (looksLikeScreensaver(c)) return c;
+    return resolveByScan(req, 'screensaverTransitionList', looksLikeScreensaver, log, '屏保控制器');
+  }
+
+  function resolveWindowManager(req, log) {
+    var w = null;
+    try { w = req(69); } catch (e) { }
+    if (looksLikeWindowManager(w)) return w;
+    return resolveByScan(req, 'resetWindow', looksLikeWindowManager, log, '窗口管理器');
+  }
+  /* ------------------------------------------------------------------ *
    * 主流程
    * ------------------------------------------------------------------ */
 
@@ -693,8 +751,10 @@
       var controller = null, windowManager = null, share = null, lockController = null;
 
       // 逐个 try/catch：任一模块取不到都不影响其它能力
-      try { controller = req(120); } catch (e) { log.warn('取屏保控制器(120)失败: ' + (e.message || e)); }
-      try { windowManager = req(69); } catch (e) { log.warn('取窗口管理器(69)失败: ' + (e.message || e)); }
+      try { controller = resolveController(req, log); } catch (e) { log.warn('取屏保控制器失败: ' + (e.message || e)); }
+      try { windowManager = resolveWindowManager(req, log); } catch (e) { log.warn('取窗口管理器失败: ' + (e.message || e)); }
+      if (!controller) log.warn('屏保控制器未定位到（模块 id 可能随版本漂移，已尝试按特征扫描）');
+      if (!windowManager) log.warn('窗口管理器未定位到（已尝试按特征扫描）');
       try { share = req(2); } catch (e) { log.warn('取 share 总线(2)失败: ' + (e.message || e)); }
       try { lockController = req(40); } catch (e) { log.warn('取屏幕锁控制器(40)失败: ' + (e.message || e)); }
 

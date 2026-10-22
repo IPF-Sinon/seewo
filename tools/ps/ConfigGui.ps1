@@ -705,6 +705,79 @@ function Stop-HostForce {
 #   说明写入是被内核过滤驱动拦掉的（常见于防篡改设计），不是普通权限问题。
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# 已知会拦截写入的「保护类」进程
+#   tasklist 显示同时跑了：
+#     ZhuDongFangYu.exe       = 360安全卫士「主动防御」（文件系统过滤驱动）
+#     EasiUpdate3Protect.exe  = 希沃/易学更新保护
+#     SeewoCore.exe           = 希沃核心服务
+#     Sia.Guard.exe           = 希沃守卫
+#   只要这些在跑，ACL 给了管理员完全控制也照样「访问被拒绝」。
+# ---------------------------------------------------------------------------
+
+function Get-SuspectBlockers {
+    $known = [ordered]@{
+        'ZhuDongFangYu'      = '360安全卫士-主动防御'
+        '360tray'            = '360安全卫士'
+        '360Safe'            = '360安全卫士'
+        'QQPCTray'           = '腾讯电脑管家'
+        'HipsTray'           = '火绒安全'
+        'EasiUpdate3Protect' = '希沃更新保护'
+        'EasiUpdate3'        = '希沃更新'
+        'SeewoCore'          = '希沃核心服务'
+        'Sia.Guard'          = '希沃守卫'
+    }
+    $hits = @()
+    foreach ($k in $known.Keys) {
+        if (@(Get-Process -Name $k -ErrorAction SilentlyContinue).Count -gt 0) {
+            $hits += ($k + '  (' + $known[$k] + ')')
+        }
+    }
+    return ,$hits
+}
+
+# 细分测试：分别试「新建文件」和「新建目录」，判断哪类操作被拦
+function Invoke-WriteDiagnostics {
+    param([string]$Dir)
+    Add-Log '--- 写能力细分测试 ---'
+    $fileOk = $false
+    $dirOk = $false
+    $probe = Join-Path $Dir ('.aura-diag-' + [System.Guid]::NewGuid().ToString('N'))
+    try {
+        [System.IO.File]::WriteAllText($probe + '.tmp', 'x')
+        $fileOk = $true
+        Add-Log '新建文件: 成功'
+        Remove-Item ($probe + '.tmp') -Force -ErrorAction SilentlyContinue
+    } catch { Add-Log ('新建文件: 被拒绝 -> ' + $_.Exception.Message) }
+    try {
+        New-Item -ItemType Directory -Path $probe -Force -ErrorAction Stop | Out-Null
+        $dirOk = $true
+        Add-Log '新建目录: 成功'
+        Remove-Item -LiteralPath $probe -Recurse -Force -ErrorAction SilentlyContinue
+    } catch { Add-Log ('新建目录: 被拒绝 -> ' + $_.Exception.Message) }
+    return [pscustomobject]@{ FileOk = $fileOk; DirOk = $dirOk }
+}
+
+# 尝试结束可疑保护进程（需用户确认）
+function Try-StopBlockers {
+    param($Names)
+    $done = @()
+    foreach ($n in @($Names)) {
+        $procName = ($n -split '  ')[0].Trim()
+        foreach ($p in @(Get-Process -Name $procName -ErrorAction SilentlyContinue)) {
+            try {
+                Add-Log ('尝试结束保护进程: ' + $procName + ' pid=' + $p.Id)
+                $p.Kill()
+                [void]$p.WaitForExit(5000)
+                $done += $procName
+                Add-Log ('已结束: ' + $procName)
+            } catch { Add-Log ('结束失败 ' + $procName + ': ' + $_.Exception.Message) }
+        }
+    }
+    Start-Sleep -Milliseconds 800
+    return ,$done
+}
+
 function Add-ProtectionFacts {
     Add-Log '--- 希沃相关服务 ---'
     $found = 0
@@ -859,19 +932,38 @@ $btnInstall.add_Click({
 
         if (-not $writable) {
             Add-ProtectionFacts
+            $diag = Invoke-WriteDiagnostics -Dir $resourcesDir
+
+            $suspects = Get-SuspectBlockers
+            if (@($suspects).Count -gt 0) {
+                Add-Log ('检测到保护类进程: ' + (@($suspects) -join ' | '))
+            } else {
+                Add-Log '未发现已知的保护类进程'
+            }
+
+            $why = ''
+            if (@($suspects).Count -gt 0) {
+                $why = '当前在运行的保护类软件：' + $script:NL + '  ' + ((@($suspects) -join ($script:NL + '  '))) + $script:NL + $script:NL
+            }
+            $capText = '新建文件=' + $diag.FileOk + '，新建目录=' + $diag.DirOk
+
             $ans = [System.Windows.Forms.MessageBox]::Show(
-                ('写入被希沃的自我保护拦截了。' + $script:NL + $script:NL +
-                 '证据：该目录 ACL 里 BUILTIN\Administrators 已是「完全控制」，' + $script:NL +
-                 '但连 takeown / icacls 都被拒绝 —— 这是内核级过滤驱动的行为，' + $script:NL +
-                 '不是普通权限问题。' + $script:NL + $script:NL +
-                 '是否尝试【临时停止希沃相关服务】后再写？' + $script:NL +
-                 '（结束后会自动恢复启动；极小概率导致管家暂时不可用）'),
-                '检测到自我保护', 'OKCancel', 'Warning')
+                ('写入被拦截了，而且不是普通权限问题。' + $script:NL + $script:NL +
+                 '证据：该目录 ACL 中 BUILTIN\Administrators 已是「完全控制」，' + $script:NL +
+                 '但连 takeown / icacls 都被拒绝 —— 这是过滤驱动在拦。' + $script:NL + $script:NL +
+                 '细分测试：' + $capText + $script:NL + $script:NL +
+                 $why +
+                 '是否尝试【临时结束这些保护进程 + 停止希沃服务】后再写？' + $script:NL +
+                 '（360 等软件通常会自己重新拉起，但写入窗口期足够）'),
+                '检测到保护，是否强行尝试', 'OKCancel', 'Warning')
+
             if ($ans -eq 'OK') {
-                Set-Status '正在尝试停止希沃保护服务…'
+                Set-Status '正在尝试结束保护进程…'
+                $killed = Try-StopBlockers -Names $suspects
+                Add-Log ('已结束的进程: ' + (@($killed) -join ', '))
                 $script:PendingRestore = Try-StopProtection
                 $writable = Test-DirWritable -Dir $resourcesDir
-                Add-Log ('停止服务后是否可写: ' + $writable)
+                Add-Log ('处理后是否可写: ' + $writable)
             }
         }
 
