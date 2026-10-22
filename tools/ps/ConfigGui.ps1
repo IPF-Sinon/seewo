@@ -604,7 +604,16 @@ $btnInstall.add_Click({
 
         Set-Status '正在备份 app.asar…'
         if (-not (Test-Path -LiteralPath $bak)) {
-            Copy-Item -LiteralPath $asar -Destination $bak -Force
+            # 只读属性会让复制失败，先清掉
+            try {
+                $asarItem = Get-Item -LiteralPath $asar -Force
+                if ($asarItem.IsReadOnly) { $asarItem.IsReadOnly = $false }
+            } catch { }
+            try {
+                Copy-Item -LiteralPath $asar -Destination $bak -Force -ErrorAction Stop
+            } catch {
+                throw ('无法创建备份文件（写入被拒绝）：' + $bak + $script:NL + $script:NL + '常见原因：' + $script:NL + '  1) 当前不是管理员，请右键 exe 选择「以管理员身份运行」' + $script:NL + '  2) 杀毒软件或「受控文件夹访问」拦截了写入' + $script:NL + '  3) app.asar 被设为只读' + $script:NL + $script:NL + '原始错误：' + $_.Exception.Message)
+            }
         }
 
         Set-Status '正在注入…'
