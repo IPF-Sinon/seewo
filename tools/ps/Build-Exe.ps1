@@ -15,7 +15,7 @@
 
 param(
     [string]$OutputDir = 'dist',
-    [string]$ExeName = '希沃屏保配置.exe'
+    [string]$ExeName = 'AuraScreensaver.exe'
 )
 
 $ErrorActionPreference = 'Stop'

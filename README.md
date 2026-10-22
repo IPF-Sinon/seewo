@@ -7,6 +7,54 @@
 
 ---
 
+## 两种用法（都不需要 Node.js）
+
+### 方式一：下载 exe（最简单）
+
+到 [Releases](../../releases) 或 Actions 的 artifacts 里下载 `AuraScreensaver.exe`，双击即用。
+
+- 单文件，**不需要安装 Node.js，也不需要懂 PowerShell**
+- 首次运行会弹 UAC（要写入 Program Files，必须管理员权限）—— 点「是」
+- 界面里依次点：`安装注入` → 重启希沃管家 → `立即预览屏保`
+
+### 方式二：用脚本（可审查源码）
+
+双击 `scripts\安装.bat` 注入，`scripts\配置屏保.bat` 打开图形界面，`scripts\卸载.bat` 还原。
+同样**不需要 Node.js** —— 注入器已用纯 PowerShell 重写。
+
+## 你需要哪些文件
+
+最小可用集合（脚本方式）：
+
+```
+tools\
+  ps\Patch-Asar.ps1                   注入器（纯 PowerShell，改写 asar）
+  payload\aura-screensaver-loader.js   加载器（被注入进管家主进程）
+scripts\
+  安装.bat                             注入
+  卸载.bat                             还原
+  配置屏保.bat                         图形界面
+  AuraScreensaver.ps1                  安装器（上面三个 .bat 调用它）
+```
+
+> ⚠️ `scripts` 与 `tools` **必须在同一层目录**，不能只拷 `scripts`。
+> 用 exe 方式的话，只需要 `AuraScreensaver.exe` 一个文件。
+
+## 为什么之前「安装报错」
+
+两个真实原因，都已修掉：
+
+1. **强依赖 Node.js** —— 旧版注入器是 `tools\patch-asar.js`，检测不到 `node` 就直接报错退出。
+   现在注入器是 `tools\ps\Patch-Asar.ps1`，用纯 PowerShell 重写了 asar 读写，不再需要 node。
+2. **没有提权** —— 希沃管家通常装在 `Program Files`，写入 `app.asar` 需要管理员权限。
+   旧版完全没处理，于是报「拒绝访问」。现在安装器和 exe 都会主动请求 UAC 提权。
+
+另外顺带修了一个很隐蔽的问题：`.ps1` 文件原本**没有 UTF-8 BOM**，
+而 Windows PowerShell 5.1 在中文系统上会按 GBK 读取无 BOM 脚本，
+导致中文提示全变乱码。现在全部补上了 BOM。
+
+---
+
 ## 它能做什么
 
 | 能力 | 说明 |
