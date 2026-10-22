@@ -6,6 +6,10 @@ node_modules/
 dist/
 # 厂商原始安装包（请自行从官方获取）
 *.7z
+# PowerShell 运行时产生的缓存
+ModuleAnalysisCache-*
+StartupProfileData-*
+*.tmp
 # 编辑器/系统
 .DS_Store
 Thumbs.db
