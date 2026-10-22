@@ -710,6 +710,113 @@ function Stop-HostForce {
 #   希沃的 SeewoZoroWall / SeewoKeLiteLady 是内核驱动，正常模式下拦写入。
 #   安全模式不加载第三方驱动 → 那时写入一定能成功。
 # ---------------------------------------------------------------------------
+# 目录模式安装（HugoAura 的做法）
+#   把 app.asar 从「文件」变成「目录」，里面的文件和 asar 里的条目一一对应。
+#   Electron 读 resources\app.asar 时，目录形式会按普通目录读取。
+#
+#   ★ 它需要的操作，和我们已实测的能力对照：
+#       1. 在 resources 下建目录         → 已实测：允许
+#       2. 把原 app.asar 改名/删掉       → 未测（需要文件的 DELETE 权限）
+#       3. 把目录改名到 resources\app.asar → 未测（本质是目录改名）
+#   所以能不能用，取决于第 2、3 步；本函数会逐步记录，失败在哪步一目了然。
+# 在解包目录里补建 asar 中的空目录（保持结构完全一致）
+function New-AsarDirTree {
+    param($Header, [string]$Root)
+    function Walk($node, $prefix) {
+        $filesProp = $node.PSObject.Properties['files']
+        if ($null -eq $filesProp) { return }
+        foreach ($p in $filesProp.Value.PSObject.Properties) {
+            $name = $p.Name
+            $child = $p.Value
+            if ($prefix) { $rel = $prefix + '/' + $name } else { $rel = $name }
+            $isDir = ($null -ne $child.PSObject.Properties['files'])
+            if (-not $isDir) { continue }
+            $path = Join-Path $Root ($rel -replace '/', [System.IO.Path]::DirectorySeparatorChar)
+            if (-not (Test-Path -LiteralPath $path)) {
+                New-Item -ItemType Directory -Path $path -Force | Out-Null
+            }
+            Walk $child $rel
+        }
+    }
+    Walk $Header ''
+}
+
+# ---------------------------------------------------------------------------
+
+function Install-DirectoryMode {
+    param([string]$Dir, [string]$PatchText)
+
+    $resources = Join-Path $Dir 'resources'
+    $asar = Join-Path $resources 'app.asar'
+    $bak = $asar + '.bak'
+
+    # ---------- 1. 解包到 %TEMP%（不受保护的地方） ----------
+    $info = Read-AsarHeader $asar
+    $leaves = Get-AsarLeaves $info.Header
+    $staging = Join-Path ([System.IO.Path]::GetTempPath()) ('aura-dir-' + [System.Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $staging -Force | Out-Null
+
+    $written = 0
+    foreach ($l in $leaves) {
+        if ($l.Unpacked) { continue }
+        $rel = $l.Rel -replace '/', [System.IO.Path]::DirectorySeparatorChar
+        $target = Join-Path $staging $rel
+        $parent = Split-Path -Parent $target
+        if ($parent -and -not (Test-Path -LiteralPath $parent)) {
+            New-Item -ItemType Directory -Path $parent -Force | Out-Null
+        }
+        if ($l.Rel -eq 'main.js') {
+            [System.IO.File]::WriteAllText($target, $PatchText, (New-Object System.Text.UTF8Encoding($false)))
+        } else {
+            [System.IO.File]::WriteAllBytes($target, (Get-EntryBytes $info $l))
+        }
+        $written++
+    }
+    New-AsarDirTree -Header $info.Header -Root $staging
+    Add-Log ('目录模式：已解包 ' + $written + ' 个文件到 ' + $staging)
+
+    # ---------- 2. 把原文件改名成备份 ----------
+    if (-not (Test-Path -LiteralPath $bak)) {
+        try {
+            Move-Item -LiteralPath $asar -Destination $bak -ErrorAction Stop
+            Add-Log '目录模式：已把 app.asar 重命名为 app.asar.bak'
+        } catch {
+            Add-Log ('目录模式：改名失败（缺 DELETE 权限）-> ' + $_.Exception.Message)
+            Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+            return [pscustomobject]@{ Ok = $false; Step = 'rename-asar'; Message = $_.Exception.Message }
+        }
+    } else {
+        try {
+            Remove-Item -LiteralPath $asar -Force -ErrorAction Stop
+            Add-Log '目录模式：已删除 app.asar（备份已存在）'
+        } catch {
+            Add-Log ('目录模式：删除失败 -> ' + $_.Exception.Message)
+            Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+            return [pscustomobject]@{ Ok = $false; Step = 'delete-asar'; Message = $_.Exception.Message }
+        }
+    }
+
+    # ---------- 3. 把暂存目录改名到 resources\app.asar ----------
+    try {
+        Move-Item -LiteralPath $staging -Destination $asar -ErrorAction Stop
+        Add-Log '目录模式：已把目录放到 app.asar 位置'
+    } catch {
+        Add-Log ('目录模式：移入失败 -> ' + $_.Exception.Message)
+        # 尽力回滚：把备份改回 app.asar
+        if (Test-Path -LiteralPath $bak) {
+            try {
+                Move-Item -LiteralPath $bak -Destination $asar -ErrorAction Stop
+                Add-Log '目录模式：已从备份改回 app.asar'
+            } catch { Add-Log ('目录模式：回滚失败！' + $_.Exception.Message) }
+        }
+        Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+        return [pscustomobject]@{ Ok = $false; Step = 'move-dir'; Message = $_.Exception.Message }
+    }
+
+    return [pscustomobject]@{ Ok = $true; Step = 'done'; Message = '' }
+}
+
+# ---------------------------------------------------------------------------
 
 function Test-IsSafeMode {
     try {
@@ -812,7 +919,7 @@ function Invoke-SafeModeAutoInstall {
         } else {
             $res = Get-PatchedMainJs -Source $mainText -LoaderText $script:LoaderText -ConfigJson $script:DefaultConfigJson
             $mainBytes = [System.Text.Encoding]::UTF8.GetBytes($res.Text)
-            $stageDir = Join-Path $env:TEMP ('aura-safe-' + [System.Guid]::NewGuid().ToString('N'))
+            $stageDir = Join-Path ([System.IO.Path]::GetTempPath()) ('aura-safe-' + [System.Guid]::NewGuid().ToString('N'))
             New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
             $staged = Join-Path $stageDir 'app.asar'
             [void](Save-Asar -Info $info -MainBytes $mainBytes -OutPath $staged)
@@ -1077,7 +1184,7 @@ $btnInstall.add_Click({
         $mainBytes = [System.Text.Encoding]::UTF8.GetBytes($res.Text)
 
         # ---------- 2b. 在 %TEMP% 暂存完整 asar 并校验 ----------
-        $stageDir = Join-Path $env:TEMP ('aura-stage-' + [System.Guid]::NewGuid().ToString('N'))
+        $stageDir = Join-Path ([System.IO.Path]::GetTempPath()) ('aura-stage-' + [System.Guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
         $staged = Join-Path $stageDir 'app.asar'
         $savedInfo = Save-Asar -Info $info -MainBytes $mainBytes -OutPath $staged
@@ -1126,6 +1233,63 @@ $btnInstall.add_Click({
                 $script:PendingRestore = Try-StopProtection
                 $writable = Test-DirWritable -Dir $resourcesDir
                 Add-Log ('处理后是否可写: ' + $writable)
+            }
+        }
+
+        # ---------- 3a. 目录模式（HugoAura 做法）----------
+        if (-not $writable) {
+            $subOk = $false
+            if ($null -ne $diag) { $subOk = [bool]$diag.SubFileOk }
+
+            if ($subOk) {
+                $tryDir = [System.Windows.Forms.MessageBox]::Show(
+                    ('还有一条路：HugoAura 的「目录模式」。' + $script:NL + $script:NL +
+                     '做法是把 app.asar 从「文件」变成「目录」，里面放解包后的文件。' + $script:NL +
+                     '你的机器上「新建目录」是允许的，所以这条值得一试。' + $script:NL + $script:NL +
+                     '失败会自动回滚，不会弄坏原文件。要试吗？'),
+                    '可以试目录模式', 'YesNo', 'Question')
+
+                if ($tryDir -eq 'Yes') {
+                    Set-Status '正在尝试目录模式…'
+                    $dm = Install-DirectoryMode -Dir $dir -PatchText $res.Text
+                    if ($dm.Ok) {
+                        Add-Log '目录模式：写入成功，准备重启管家'
+                        Set-Status '正在重启希沃管家…'
+                        if (Test-Path -LiteralPath $script:LogPath) {
+                            Remove-Item -LiteralPath $script:LogPath -Force -ErrorAction SilentlyContinue
+                        }
+                        $started2 = Start-Host -Dir $dir
+                        Add-Log ('重启管家: ' + $started2)
+                        Set-Status '正在确认加载器已运行…'
+                        $dl2 = (Get-Date).AddSeconds(30)
+                        $ready2 = $false
+                        while ((Get-Date) -lt $dl2) {
+                            if (Test-Path -LiteralPath $script:LogPath) {
+                                try {
+                                    $lt = [System.IO.File]::ReadAllText($script:LogPath, [System.Text.Encoding]::UTF8)
+                                    if ($lt.Contains('命令桥已启动')) { $ready2 = $true; break }
+                                } catch { }
+                            }
+                            Start-Sleep -Milliseconds 800
+                        }
+                        Add-Log ('加载器就绪: ' + $ready2)
+                        Refresh-UiState -Full
+                        [System.Windows.Forms.MessageBox]::Show(
+                            ('目录模式安装成功！' + $script:NL + $script:NL +
+                             '加载器就绪: ' + $ready2 + $script:NL + $script:NL +
+                             '现在可以配置并预览了。'),
+                            '安装成功', 'OK', 'Information') | Out-Null
+                        return
+                    } else {
+                        Add-Log ('目录模式失败于步骤: ' + $dm.Step + ' -> ' + $dm.Message)
+                        [System.Windows.Forms.MessageBox]::Show(
+                            ('目录模式也不行，卡在步骤：' + $dm.Step + $script:NL + $dm.Message + $script:NL + $script:NL +
+                             '继续走安全模式方案。'),
+                            '目录模式失败', 'OK', 'Warning') | Out-Null
+                    }
+                }
+            } else {
+                Add-Log '新目录内建文件被拒绝，目录模式不可行，跳过'
             }
         }
 
