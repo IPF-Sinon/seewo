@@ -1,4 +1,4 @@
-﻿<#
+<#
   希沃屏保配置界面（纯 PowerShell + WinForms，无需 Node.js）
   ============================================================================
   设计原则（按用户要求）：
@@ -905,13 +905,16 @@ $btnInstall.add_Click({
 
         $res = Get-PatchedMainJs -Source $mainText -LoaderText $script:LoaderText -ConfigJson $script:DefaultConfigJson
         Add-Log ('注入点 @' + $res.AnchorIndex + ' 入口 id=' + $res.EntryId + ' 增加 ' + $res.DeltaLength + ' 字符')
-        $newBytes = [System.Text.Encoding]::UTF8.GetBytes($res.Text)
+        # ★ 这里得到的是**打完补丁的 main.js 文本**，不是完整 asar！
+        #   必须用 Save-Asar 把「原 asar 的其它文件 + 新 main.js」重新组装成完整 asar。
+        $mainBytes = [System.Text.Encoding]::UTF8.GetBytes($res.Text)
 
-        # ---------- 2b. 在 %TEMP% 暂存并校验 ----------
+        # ---------- 2b. 在 %TEMP% 暂存完整 asar 并校验 ----------
         $stageDir = Join-Path $env:TEMP ('aura-stage-' + [System.Guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
         $staged = Join-Path $stageDir 'app.asar'
-        [System.IO.File]::WriteAllBytes($staged, $newBytes)
+        $savedInfo = Save-Asar -Info $info -MainBytes $mainBytes -OutPath $staged
+        Add-Log ('已组装完整 asar: ' + $savedInfo.Bytes + ' 字节')
 
         $vInfo = Read-AsarHeader $staged
         $vLeaves = Get-AsarLeaves $vInfo.Header
@@ -919,7 +922,7 @@ $btnInstall.add_Click({
         foreach ($l in $vLeaves) { if ($l.Rel -eq 'main.js') { $vMain = $l } }
         $vText = [System.Text.Encoding]::UTF8.GetString((Get-EntryBytes $vInfo $vMain))
         if (-not $vText.Contains($script:MarkBegin)) { throw '暂存文件校验失败：没有注入标记' }
-        Add-Log ('暂存校验通过: 条目数=' + $vLeaves.Count + '，大小=' + $newBytes.Length)
+        Add-Log ('暂存校验通过: 条目数=' + $vLeaves.Count + '，大小=' + (Get-Item -LiteralPath $staged).Length + ' 字节')
 
         # ---------- 3. 写权限 ----------
         Set-Status '正在检查写权限…'
@@ -970,7 +973,7 @@ $btnInstall.add_Click({
         # ---------- 4. 仍不可写 → 导出保底 ----------
         if (-not $writable) {
             Add-Log '仍不可写，改为导出补丁文件'
-            $exported = Export-PatchedAsar -Bytes $newBytes
+            $exported = Export-PatchedAsar -Bytes ([System.IO.File]::ReadAllBytes($staged))
             Refresh-UiState -Full
             if ($exported) {
                 [System.Windows.Forms.MessageBox]::Show(
