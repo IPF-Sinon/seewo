@@ -817,6 +817,117 @@ function Install-DirectoryMode {
 }
 
 # ---------------------------------------------------------------------------
+# 安全模式动作（安装 / 卸载共用）
+# ---------------------------------------------------------------------------
+
+function Invoke-EnterSafeModeAction {
+    param([ValidateSet('install', 'uninstall')][string]$Action = 'install')
+
+    $exe = Get-SelfExePath
+    if (-not $exe) { throw '无法确定自身 exe 路径' }
+    $recovery = Write-SafeModeRecoveryBat
+
+    $flag = '-SafeInstall'
+    if ($Action -eq 'uninstall') { $flag = '-SafeUninstall' }
+
+    Add-Log ('设置 bcdedit safeboot minimal（动作=' + $Action + '）')
+    $o = & bcdedit.exe /set '{current}' safeboot minimal 2>&1 | Out-String
+    Add-Log ('bcdedit 输出: ' + $o.Trim())
+    if ($LASTEXITCODE -ne 0) { throw ('bcdedit 失败：' + $o) }
+
+    $runOnce = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce'
+    $cmdLine = '"' + $exe + '" ' + $flag
+    New-ItemProperty -Path $runOnce -Name 'AuraScreensaver_SafeInstall' -Value $cmdLine -PropertyType String -Force | Out-Null
+    Add-Log ('RunOnce = ' + $cmdLine)
+
+    & shutdown.exe /r /t 10 /c "AuraScreensaver: 即将重启进入安全模式完成操作" 2>&1 | Out-Null
+    return $recovery
+}
+
+# 安全模式下执行具体动作，然后必定清除 safeboot 并重启回正常
+function Invoke-SafeModeAutoAction {
+    param([ValidateSet('install', 'uninstall')][string]$Action = 'install')
+
+    if (-not (Test-Path -LiteralPath $script:ConfigDir)) {
+        try { New-Item -ItemType Directory -Path $script:ConfigDir -Force | Out-Null } catch { }
+    }
+    $script:InstallLog = Join-Path $script:ConfigDir 'install.log'
+    $script:ExeLog = $null
+    Add-Log ('==== 安全模式自动' + $Action + ' 开始 ====')
+
+    try {
+        $dir = Resolve-SeewoDirEmbedded
+        Add-Log ('安装目录: ' + $dir)
+        if (-not $dir) { throw '安全模式下没找到安装目录' }
+
+        $asar = Join-Path (Join-Path $dir 'resources') 'app.asar'
+        $bak = $asar + '.bak'
+
+        if ($Action -eq 'uninstall') {
+            if (-not (Test-Path -LiteralPath $bak)) { throw ('没有备份文件：' + $bak) }
+            # 目录模式下 app.asar 可能是个目录，先删掉
+            if (Test-Path -LiteralPath $asar -PathType Container) {
+                Remove-Item -LiteralPath $asar -Recurse -Force -ErrorAction Stop
+                Add-Log '已删除目录形态的 app.asar'
+            }
+            Copy-Item -LiteralPath $bak -Destination $asar -Force -ErrorAction Stop
+            Add-Log '已用备份还原 app.asar'
+        } else {
+            $info = Read-AsarHeader $asar
+            $leaves = Get-AsarLeaves $info.Header
+            $mainLeaf = $null
+            foreach ($l in $leaves) { if ($l.Rel -eq 'main.js') { $mainLeaf = $l } }
+            if ($null -eq $mainLeaf) { throw 'asar 里没有 main.js' }
+            $mainText = [System.Text.Encoding]::UTF8.GetString((Get-EntryBytes $info $mainLeaf))
+
+            if ($mainText.Contains($script:MarkBegin)) {
+                Add-Log '已经是注入状态，跳过注入'
+            } else {
+                $res = Get-PatchedMainJs -Source $mainText -LoaderText $script:LoaderText -ConfigJson $script:DefaultConfigJson
+                $mainBytes = [System.Text.Encoding]::UTF8.GetBytes($res.Text)
+                $stage = Join-Path ([System.IO.Path]::GetTempPath()) ('aura-safe-' + [System.Guid]::NewGuid().ToString('N'))
+                New-Item -ItemType Directory -Path $stage -Force | Out-Null
+                $staged = Join-Path $stage 'app.asar'
+                [void](Save-Asar -Info $info -MainBytes $mainBytes -OutPath $staged)
+                Add-Log ('已组装 asar: ' + (Get-Item $staged).Length + ' 字节')
+
+                if (-not (Test-Path -LiteralPath $bak)) {
+                    Copy-Item -LiteralPath $asar -Destination $bak -Force
+                    Add-Log '已备份 app.asar.bak'
+                }
+                Copy-Item -LiteralPath $staged -Destination ($asar + '.new') -Force
+                if (Test-Path -LiteralPath $asar -PathType Container) {
+                    Remove-Item -LiteralPath $asar -Recurse -Force -ErrorAction Stop
+                }
+                if (Test-Path -LiteralPath $asar) {
+                    [System.IO.File]::Replace($asar + '.new', $asar, $null)
+                } else {
+                    Move-Item -LiteralPath ($asar + '.new') -Destination $asar -Force
+                }
+                Remove-Item -LiteralPath ($asar + '.new') -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+                Add-Log '已替换 app.asar'
+            }
+        }
+
+        Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' -Name 'AuraScreensaver_SafeInstall' -ErrorAction SilentlyContinue
+        $o2 = & bcdedit.exe /deletevalue '{current}' safeboot 2>&1 | Out-String
+        Add-Log ('已清除 safeboot: ' + $o2.Trim())
+        Add-Log '操作完成，15 秒后重启回正常模式'
+        & shutdown.exe /r /t 15 /c "AuraScreensaver: 已完成，即将重启回正常模式" 2>&1 | Out-Null
+        return $true
+    } catch {
+        Add-Log ('安全模式自动操作失败: ' + $_.Exception.Message)
+        Add-Log ('调用栈: ' + $_.ScriptStackTrace)
+        try { & bcdedit.exe /deletevalue '{current}' safeboot 2>&1 | Out-Null } catch { }
+        try { Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' -Name 'AuraScreensaver_SafeInstall' -ErrorAction SilentlyContinue } catch { }
+        Add-Log '已撤除安全模式设置，15 秒后重启回正常模式'
+        & shutdown.exe /r /t 15 /c "AuraScreensaver: 操作失败，已恢复正常启动" 2>&1 | Out-Null
+        return $false
+    }
+}
+
+# ---------------------------------------------------------------------------
 
 function Test-IsSafeMode {
     try {
@@ -1539,13 +1650,16 @@ $btnUninstall.add_Click({
         '确认卸载', 'OKCancel', 'Question')
     if ($ans -ne 'OK') { return }
 
+    Initialize-InstallerLog
+
     $btnUninstall.Enabled = $false
     try {
         if (-not $st -or -not $st.Dir) { $st = Get-InjectionState }
         $dir = $st.Dir
         if (-not $dir) { throw '找不到安装目录' }
+        Add-Log ('卸载：安装目录 ' + $dir)
 
-        $asar = Join-Path $dir 'resources\app.asar'
+        $asar = Join-Path (Join-Path $dir 'resources') 'app.asar'
         $bak = $asar + '.bak'
         if (-not (Test-Path -LiteralPath $bak)) { throw ('没有备份文件：' + $bak) }
 
@@ -1553,7 +1667,41 @@ $btnUninstall.add_Click({
         Stop-Host
 
         Set-Status '正在还原官方 app.asar…'
-        Copy-Item -LiteralPath $bak -Destination $asar -Force
+        $restoreFailed = $null
+        try {
+            if (Test-Path -LiteralPath $asar -PathType Container) {
+                Remove-Item -LiteralPath $asar -Recurse -Force -ErrorAction Stop
+                Add-Log '卸载：已删除目录形态的 app.asar'
+            }
+            Copy-Item -LiteralPath $bak -Destination $asar -Force -ErrorAction Stop
+            Add-Log '卸载：已还原 app.asar'
+        } catch {
+            $restoreFailed = $_
+            Add-Log ('卸载失败（写入被拒）: ' + $_.Exception.Message)
+        }
+
+        if ($null -ne $restoreFailed) {
+            # 写入被驱动拦 → 走安全模式
+            if (Test-IsSafeMode) {
+                throw ('当前已在安全模式下仍无法还原。' + $script:NL + $restoreFailed.Exception.Message)
+            }
+            $pick = [System.Windows.Forms.MessageBox]::Show(
+                ('还原失败：' + $restoreFailed.Exception.Message + $script:NL + $script:NL +
+                 '卸载同样需要写入 app.asar，所以也会被希沃的驱动拦。' + $script:NL + $script:NL +
+                 '要重启到安全模式自动卸载吗？' + $script:NL +
+                 '（全自动：注入回滚 → 关掉安全模式 → 重启回正常）'),
+                '需要安全模式才能卸载', 'YesNo', 'Question')
+            if ($pick -eq 'Yes') {
+                Set-Status '正在准备重启到安全模式…'
+                [void](Invoke-EnterSafeModeAction -Action 'uninstall')
+                [System.Windows.Forms.MessageBox]::Show(
+                    ('已设置好，10 秒后重启进入安全模式自动卸载。' + $script:NL + $script:NL +
+                     '急救：万一卡在安全模式，双击桌面「退出安全模式.bat」。'),
+                    '即将重启', 'OK', 'Information') | Out-Null
+                return
+            }
+            return
+        }
 
         Set-Status '正在重启希沃管家…'
         [void](Start-Host -Dir $dir)
@@ -1564,8 +1712,12 @@ $btnUninstall.add_Click({
              '备份文件仍保留，可再次安装。'),
             '卸载完成', 'OK', 'Information') | Out-Null
     } catch {
+        Add-Log ('卸载异常: ' + $_.Exception.Message)
         Refresh-UiState -Full
-        [System.Windows.Forms.MessageBox]::Show(('卸载失败：' + $_.Exception.Message), '卸载失败', 'OK', 'Error') | Out-Null
+        [System.Windows.Forms.MessageBox]::Show(
+            ('卸载失败：' + $_.Exception.Message + $script:NL + $script:NL +
+             '详细日志：' + $script:NL + $script:InstallLog),
+            '卸载失败', 'OK', 'Error') | Out-Null
     } finally {
         $btnUninstall.Enabled = $true
     }
@@ -1601,14 +1753,24 @@ $form.add_Shown({
     }
 })
 
-# 安全模式自动安装：由 RunOnce 在安全模式登录时带 -SafeInstall 调起
-if ($args -contains '-SafeInstall') {
+# 安全模式自动动作：由 RunOnce 在安全模式登录时带 -SafeInstall / -SafeUninstall 调起
+if (($args -contains '-SafeInstall') -or ($args -contains '-SafeUninstall')) {
     try {
         Initialize-InstallerLog
         Add-LogFacts
         Add-Log ('安全模式: ' + (Test-IsSafeMode))
     } catch { }
-    [void](Invoke-SafeModeAutoInstall)
+
+    if (-not (Test-IsSafeMode)) {
+        # 已经回到正常模式：说明安全模式里跑过了，这里只清理，绝不重启
+        try { Add-Log '不在安全模式，跳过自动动作（仅清理 RunOnce）' } catch { }
+        try { Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' -Name 'AuraScreensaver_SafeInstall' -ErrorAction SilentlyContinue } catch { }
+        exit 0
+    }
+
+    $act = 'install'
+    if ($args -contains '-SafeUninstall') { $act = 'uninstall' }
+    [void](Invoke-SafeModeAutoAction -Action $act)
     exit 0
 }
 

@@ -693,10 +693,13 @@
       var m = req.m;
       if (!m || typeof m !== 'object') { log.warn(label + '：模块表不可用，无法扫描'); return null; }
       var ids = Object.keys(m);
+      var matched = 0;
       for (var i = 0; i < ids.length; i++) {
         var id = ids[i];
         var src = getFactorySource(req, id);
         if (!src || src.indexOf(needle) === -1) continue;
+        matched++;
+        if (matched <= 3) log.info(label + '：候选模块 ' + id + '（含特征 ' + needle + '）');
         var cand = null;
         try { cand = req(Number(id)); } catch (e) { continue; }
         if (validator(cand)) {
@@ -704,6 +707,8 @@
           return cand;
         }
       }
+      if (matched === 0) log.warn(label + '：模块表共 ' + Object.keys(m).length + ' 项，但没有工厂包含特征 "' + needle + '"');
+      else log.warn(label + '：有 ' + matched + ' 个候选，但都不满足形状要求');
     } catch (e) { log.warn(label + '扫描异常: ' + (e && e.message || e)); }
     return null;
   }
@@ -720,6 +725,73 @@
     try { w = req(69); } catch (e) { }
     if (looksLikeWindowManager(w)) return w;
     return resolveByScan(req, 'resetWindow', looksLikeWindowManager, log, '窗口管理器');
+  }
+  /* ------------------------------------------------------------------ *
+   * 模块定位重试（HugoAura 的做法：模块是懒加载的，boot 时可能还没实例化）
+   *   - 最多尝试 30 次，间隔 800ms 起，逐步退避到 5s
+   *   - 每次只做「还没搞定」的那部分，成功即停
+   * ------------------------------------------------------------------ */
+
+
+  /** 定时器 unref：重试不该单独把进程吊住（Electron 主进程本来就有 app 保活） */
+  function laterTick(fn, ms) {
+    var t = setTimeout(fn, ms);
+    try { if (t && typeof t.unref === 'function') t.unref(); } catch (e) { }
+    return t;
+  }
+
+  function startResolverRetry(req, share, cfg, log, state, result) {
+    var attempts = 0;
+    var maxAttempts = 30;
+    var delay = 800;
+    var hooked = false;
+    var guarded = false;
+
+    function tick() {
+      attempts++;
+      try {
+        if (!hooked) {
+          var c = resolveController(req, log);
+          if (c) {
+            if (installScreensaverHook(c, share, cfg, log, state)) {
+              hooked = true;
+              result.hook = true;
+              log.info('屏保拦截已安装（第 ' + attempts + ' 次尝试命中）');
+            }
+          }
+        }
+        if (!guarded) {
+          var w = resolveWindowManager(req, log);
+          if (w) {
+            if (installLockCascadeGuard(w, cfg, log, state)) {
+              guarded = true;
+              result.lockCascadeGuard = true;
+              log.info('级联守卫已安装（第 ' + attempts + ' 次尝试命中）');
+            }
+          }
+        }
+      } catch (e) {
+        log.warn('重试安装异常: ' + (e && e.message || e));
+      }
+
+      if (hooked && guarded) {
+        state.ok = true;
+        result.installed = true;
+        try {
+          result.control = installControl(resolveController(req, log), share, resolveWindowManager(req, log), cfg, log, state);
+        } catch (e) { }
+        log.info('模块定位完成（共尝试 ' + attempts + ' 次）');
+        return;
+      }
+      if (attempts >= maxAttempts) {
+        log.warn('模块定位放弃（已尝试 ' + attempts + ' 次）—— 若功能无效请把本日志发回');
+        return;
+      }
+      delay = Math.min(Math.round(delay * 1.5), 5000);
+      laterTick(tick, delay);
+    }
+
+    laterTick(tick, delay);
   }
   /* ------------------------------------------------------------------ *
    * 主流程
@@ -763,6 +835,7 @@
       var guardOk = installLockCascadeGuard(windowManager, cfg, log, state);
 
       state.ok = hookOk || guardOk;
+      var hooksReady = hookOk && guardOk;
 
       // 控制通道：让 GUI 能「立即预览 / 关闭 / 重载配置」
       var control = installControl(controller, share, windowManager, cfg, log, state);
@@ -786,6 +859,8 @@
         version: '1.0.0',
       };
       g[GLOBAL_KEY] = result;
+      // 模块可能还没实例化：启动带退避的重试（HugoAura 同思路）
+      if (!hooksReady) { startResolverRetry(req, share, cfg, log, state, result); }
       log.info('aura-screensaver 已安装: ' + JSON.stringify({
         hook: hookOk, guard: guardOk, screensaverEnabled: cfg.screensaverEnabled,
       }));
