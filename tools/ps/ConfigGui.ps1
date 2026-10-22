@@ -14,6 +14,28 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
+# ---------------------------------------------------------------------------
+# 高 DPI 适配
+#   不声明 DPI 感知时，Windows 会把整个窗口按缩放比例位图拉伸，
+#   在 150%/200% 缩放下窗口会大到超出屏幕 —— 底部按钮就点不到了。
+#   声明之后窗口按真实像素绘制，再把布局改成「可滚动 + 底部固定」。
+# ---------------------------------------------------------------------------
+
+try {
+    if (-not ('AuraDpi' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public class AuraDpi {
+    [DllImport("user32.dll")]
+    public static extern bool SetProcessDPIAware();
+}
+'@
+    }
+    [void][AuraDpi]::SetProcessDPIAware()
+} catch { }
+
+
 $ErrorActionPreference = 'Stop'
 
 $script:NL = [Environment]::NewLine
@@ -229,10 +251,20 @@ function Invoke-Preview {
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = '希沃屏保配置'
-$form.Size = New-Object System.Drawing.Size(660, 730)
+# 尺寸收敛到屏幕工作区，避免小屏/高缩放下超出屏幕
+$wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+$wantW = 660
+$wantH = 760
+if ($wantW -gt ($wa.Width - 40)) { $wantW = $wa.Width - 40 }
+if ($wantH -gt ($wa.Height - 40)) { $wantH = $wa.Height - 40 }
+if ($wantW -lt 420) { $wantW = 420 }
+if ($wantH -lt 360) { $wantH = 360 }
+$form.Size = New-Object System.Drawing.Size($wantW, $wantH)
+$form.MinimumSize = New-Object System.Drawing.Size(420, 360)
 $form.StartPosition = 'CenterScreen'
-$form.FormBorderStyle = 'FixedSingle'
-$form.MaximizeBox = $false
+$form.FormBorderStyle = 'Sizable'
+$form.MaximizeBox = $true
+$form.AutoScroll = $true
 $form.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
 
 $lblStatus = New-Object System.Windows.Forms.Label
@@ -538,6 +570,7 @@ function Refresh-UiState {
         $btnSavePreview.Visible = $true
         $btnUninstall.Visible = $true
         $linkLog.Visible = $true
+        if ($script:PanelBottom) { $script:PanelBottom.Visible = $true }
 
         if (-not $script:FormLoaded) {
             try { Fill-Form -Cfg (Read-Config) } catch { }
@@ -553,6 +586,7 @@ function Refresh-UiState {
         $btnSavePreview.Visible = $false
         $btnUninstall.Visible = $false
         $linkLog.Visible = $false
+        if ($script:PanelBottom) { $script:PanelBottom.Visible = $false }
         $btnInstall.Visible = $true
 
         if (-not $st.AsarExists) {
@@ -1774,4 +1808,73 @@ if (($args -contains '-SafeInstall') -or ($args -contains '-SafeUninstall')) {
     exit 0
 }
 
+# ---------------------------------------------------------------------------
+# 自适应布局：顶部状态 / 中间可滚动 / 底部固定按钮栏
+#   这样无论缩放多大、窗口多小，按钮永远在可见区域内。
+# ---------------------------------------------------------------------------
+
+$panelTop = New-Object System.Windows.Forms.Panel
+$panelTop.Dock = 'Top'
+$panelTop.Height = 104
+
+$panelBottom = New-Object System.Windows.Forms.Panel
+$panelBottom.Dock = 'Bottom'
+$panelBottom.Height = 66
+
+$panelMain = New-Object System.Windows.Forms.Panel
+$panelMain.Dock = 'Fill'
+$panelMain.AutoScroll = $true
+
+# 先把控件从窗体搬到面板（顺序：Top / Bottom / Fill）
+$form.Controls.Remove($lblStatus)
+$panelTop.Controls.Add($lblStatus)
+$lblStatus.Location = New-Object System.Drawing.Point(8, 6)
+$lblStatus.Size = New-Object System.Drawing.Size(620, 92)
+
+$form.Controls.Remove($btnSavePreview)
+$form.Controls.Remove($btnUninstall)
+$form.Controls.Remove($linkLog)
+$panelBottom.Controls.Add($btnSavePreview)
+$panelBottom.Controls.Add($btnUninstall)
+$panelBottom.Controls.Add($linkLog)
+$btnSavePreview.Location = New-Object System.Drawing.Point(8, 12)
+$btnSavePreview.Size = New-Object System.Drawing.Size(220, 42)
+$btnUninstall.Location = New-Object System.Drawing.Point(238, 12)
+$btnUninstall.Size = New-Object System.Drawing.Size(150, 42)
+$linkLog.Location = New-Object System.Drawing.Point(400, 22)
+$linkLog.Size = New-Object System.Drawing.Size(110, 22)
+
+$form.Controls.Remove($btnInstall)
+$form.Controls.Remove($group)
+$panelMain.Controls.Add($btnInstall)
+$panelMain.Controls.Add($group)
+$btnInstall.Location = New-Object System.Drawing.Point(10, 10)
+$btnInstall.Size = New-Object System.Drawing.Size(600, 52)
+$group.Location = New-Object System.Drawing.Point(10, 10)
+$group.Size = New-Object System.Drawing.Size(596, 486)
+
+# 宽度自适应：窗口拉宽时让配置区跟着变宽（避免出现横向滚动条）
+function Update-AuraLayout {
+    try {
+        $w = $panelMain.ClientSize.Width - 30
+        if ($w -lt 420) { $w = 420 }
+        if ($w -gt 980) { $w = 980 }
+        $btnInstall.Width = $w
+        $group.Width = $w
+        $inner = $w - 32
+        $txtSource.Width = $inner - 78
+        $txtImages.Width = $inner
+        $txtTexts.Width = $inner
+        $numInterval.Width = 80
+    } catch { }
+}
+$panelMain.add_Resize({ Update-AuraLayout })
+
+$form.Controls.Add($panelTop)
+$form.Controls.Add($panelBottom)
+$form.Controls.Add($panelMain)
+$script:PanelBottom = $panelBottom
+
+
+Update-AuraLayout
 [void]$form.ShowDialog()
