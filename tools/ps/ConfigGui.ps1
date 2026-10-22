@@ -706,6 +706,156 @@ function Stop-HostForce {
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
+# 安全模式相关
+#   希沃的 SeewoZoroWall / SeewoKeLiteLady 是内核驱动，正常模式下拦写入。
+#   安全模式不加载第三方驱动 → 那时写入一定能成功。
+# ---------------------------------------------------------------------------
+
+function Test-IsSafeMode {
+    try {
+        $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+        return ([string]$cs.BootupState -match 'Safe')
+    } catch {
+        try {
+            $bs = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\SafeBoot\Option' -ErrorAction SilentlyContinue)
+            return ($null -ne $bs)
+        } catch { return $false }
+    }
+}
+
+function Test-IsAdminNow {
+    try {
+        $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $pr = New-Object Security.Principal.WindowsPrincipal($id)
+        return $pr.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch { return $false }
+}
+
+function Get-SelfExePath {
+    try { return [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName } catch { }
+    return $PSCommandPath
+}
+
+# 在桌面放一个「退出安全模式」急救批处理，防止万一卡在安全模式
+function Write-SafeModeRecoveryBat {
+    try {
+        $desktop = [Environment]::GetFolderPath('Desktop')
+        if (-not $desktop) { $desktop = $env:USERPROFILE }
+        $bat = Join-Path $desktop '退出安全模式.bat'
+        $lines = @(
+            '@echo off',
+            'chcp 65001 >nul 2>nul',
+            'echo 正在恢复正常启动...',
+            'bcdedit /deletevalue {current} safeboot',
+            'if errorlevel 1 echo 可能本来就不在安全模式。',
+            'echo.',
+            'echo 完成。请重启电脑。',
+            'pause'
+        )
+        [System.IO.File]::WriteAllText($bat, ($lines -join [Environment]::NewLine), (New-Object System.Text.UTF8Encoding($false)))
+        Add-Log ('已生成急救脚本: ' + $bat)
+        return $bat
+    } catch {
+        Add-Log ('生成急救脚本失败: ' + $_.Exception.Message)
+        return $null
+    }
+}
+
+# 设置「下次启动进安全模式 + 登录后自动运行本程序完成注入」
+function Invoke-EnterSafeModeInstall {
+    $exe = Get-SelfExePath
+    if (-not $exe) { throw '无法确定自身 exe 路径' }
+
+    $recovery = Write-SafeModeRecoveryBat
+
+    Add-Log '设置 bcdedit safeboot minimal'
+    $out = & bcdedit.exe /set '{current}' safeboot minimal 2>&1 | Out-String
+    Add-Log ('bcdedit 输出: ' + $out.Trim())
+    if ($LASTEXITCODE -ne 0) { throw ('bcdedit 失败，无法进入安全模式。输出：' + $out) }
+
+    Add-Log '写入 RunOnce（安全模式登录后自动运行）'
+    $runOnce = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce'
+    $cmdLine = '"' + $exe + '" -SafeInstall'
+    New-ItemProperty -Path $runOnce -Name 'AuraScreensaver_SafeInstall' -Value $cmdLine -PropertyType String -Force | Out-Null
+    Add-Log ('RunOnce = ' + $cmdLine)
+
+    Add-Log '10 秒后重启'
+    & shutdown.exe /r /t 10 /c "AuraScreensaver: 即将重启进入安全模式并自动完成注入" 2>&1 | Out-Null
+    return $recovery
+}
+
+# 安全模式下自动执行：注入 + 清除 safeboot + 重启回正常
+function Invoke-SafeModeAutoInstall {
+    $log = Join-Path $script:ConfigDir 'install.log'
+    try {
+        if (-not (Test-Path -LiteralPath $script:ConfigDir)) {
+            New-Item -ItemType Directory -Path $script:ConfigDir -Force | Out-Null
+        }
+        $script:InstallLog = $log
+        $script:ExeLog = $null
+        Add-Log '==== 安全模式自动安装开始 ===='
+
+        $dir = Resolve-SeewoDirEmbedded
+        Add-Log ('安装目录: ' + $dir)
+        if (-not $dir) { throw '安全模式下也没找到安装目录' }
+
+        $asar = Join-Path (Join-Path $dir 'resources') 'app.asar'
+        $bak = $asar + '.bak'
+        $info = Read-AsarHeader $asar
+        $leaves = Get-AsarLeaves $info.Header
+        $mainLeaf = $null
+        foreach ($l in $leaves) { if ($l.Rel -eq 'main.js') { $mainLeaf = $l } }
+        $mainText = [System.Text.Encoding]::UTF8.GetString((Get-EntryBytes $info $mainLeaf))
+
+        if ($mainText.Contains($script:MarkBegin)) {
+            Add-Log '已经是注入状态，跳过'
+        } else {
+            $res = Get-PatchedMainJs -Source $mainText -LoaderText $script:LoaderText -ConfigJson $script:DefaultConfigJson
+            $mainBytes = [System.Text.Encoding]::UTF8.GetBytes($res.Text)
+            $stageDir = Join-Path $env:TEMP ('aura-safe-' + [System.Guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
+            $staged = Join-Path $stageDir 'app.asar'
+            [void](Save-Asar -Info $info -MainBytes $mainBytes -OutPath $staged)
+            Add-Log ('已组装 asar: ' + (Get-Item $staged).Length + ' 字节')
+
+            if (-not (Test-Path -LiteralPath $bak)) {
+                Copy-Item -LiteralPath $asar -Destination $bak -Force
+                Add-Log '已备份 app.asar.bak'
+            }
+            Copy-Item -LiteralPath $staged -Destination ($asar + '.new') -Force
+            try {
+                if (Test-Path -LiteralPath $asar) { [System.IO.File]::Replace($asar + '.new', $asar, $null) }
+                else { Move-Item -LiteralPath ($asar + '.new') -Destination $asar -Force }
+                Add-Log '已替换 app.asar'
+            } finally {
+                Remove-Item -LiteralPath ($asar + '.new') -Force -ErrorAction SilentlyContinue
+            }
+            Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+        Add-Log '清除 RunOnce'
+        Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' -Name 'AuraScreensaver_SafeInstall' -ErrorAction SilentlyContinue
+
+        Add-Log '清除 safeboot（下次正常启动）'
+        $o2 = & bcdedit.exe /deletevalue '{current}' safeboot 2>&1 | Out-String
+        Add-Log ('bcdedit 输出: ' + $o2.Trim())
+
+        Add-Log '注入成功，15 秒后重启回正常模式'
+        & shutdown.exe /r /t 15 /c "AuraScreensaver: 注入完成，即将重启回正常模式" 2>&1 | Out-Null
+        return $true
+    } catch {
+        Add-Log ('安全模式自动安装失败: ' + $_.Exception.Message)
+        Add-Log ('调用栈: ' + $_.ScriptStackTrace)
+        # 失败时也要退出安全模式，避免把机器卡在安全模式
+        try { & bcdedit.exe /deletevalue '{current}' safeboot 2>&1 | Out-Null } catch { }
+        try { Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' -Name 'AuraScreensaver_SafeInstall' -ErrorAction SilentlyContinue } catch { }
+        Add-Log '已撤除安全模式设置，15 秒后重启回正常模式'
+        & shutdown.exe /r /t 15 /c "AuraScreensaver: 注入失败，已恢复正常启动" 2>&1 | Out-Null
+        return $false
+    }
+}
+
+# ---------------------------------------------------------------------------
 # 已知会拦截写入的「保护类」进程
 #   tasklist 显示同时跑了：
 #     ZhuDongFangYu.exe       = 360安全卫士「主动防御」（文件系统过滤驱动）
@@ -742,20 +892,37 @@ function Invoke-WriteDiagnostics {
     Add-Log '--- 写能力细分测试 ---'
     $fileOk = $false
     $dirOk = $false
+    $subFileOk = $false
     $probe = Join-Path $Dir ('.aura-diag-' + [System.Guid]::NewGuid().ToString('N'))
+
+    # 1) 新建文件
     try {
         [System.IO.File]::WriteAllText($probe + '.tmp', 'x')
         $fileOk = $true
         Add-Log '新建文件: 成功'
         Remove-Item ($probe + '.tmp') -Force -ErrorAction SilentlyContinue
     } catch { Add-Log ('新建文件: 被拒绝 -> ' + $_.Exception.Message) }
+
+    # 2) 新建目录
     try {
         New-Item -ItemType Directory -Path $probe -Force -ErrorAction Stop | Out-Null
         $dirOk = $true
         Add-Log '新建目录: 成功'
-        Remove-Item -LiteralPath $probe -Recurse -Force -ErrorAction SilentlyContinue
     } catch { Add-Log ('新建目录: 被拒绝 -> ' + $_.Exception.Message) }
-    return [pscustomobject]@{ FileOk = $fileOk; DirOk = $dirOk }
+
+    # 3) 在新建的目录里再建文件
+    #    这一项决定「HugoAura 那种把 app.asar 变成目录」的做法是否可行
+    if ($dirOk) {
+        try {
+            $f2 = Join-Path $probe 'x.txt'
+            [System.IO.File]::WriteAllText($f2, 'x')
+            $subFileOk = $true
+            Add-Log '新目录内建文件: 成功（目录模式可行）'
+        } catch { Add-Log ('新目录内建文件: 被拒绝 -> ' + $_.Exception.Message) }
+        Remove-Item -LiteralPath $probe -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    return [pscustomobject]@{ FileOk = $fileOk; DirOk = $dirOk; SubFileOk = $subFileOk }
 }
 
 # 尝试结束可疑保护进程（需用户确认）
@@ -944,21 +1111,13 @@ $btnInstall.add_Click({
                 Add-Log '未发现已知的保护类进程'
             }
 
-            $why = ''
-            if (@($suspects).Count -gt 0) {
-                $why = '当前在运行的保护类软件：' + $script:NL + '  ' + ((@($suspects) -join ($script:NL + '  '))) + $script:NL + $script:NL
-            }
-            $capText = '新建文件=' + $diag.FileOk + '，新建目录=' + $diag.DirOk
-
+            # 先尝试结束保护进程（360 通常杀不掉，希沃的能杀）
             $ans = [System.Windows.Forms.MessageBox]::Show(
-                ('写入被拦截了，而且不是普通权限问题。' + $script:NL + $script:NL +
-                 '证据：该目录 ACL 中 BUILTIN\Administrators 已是「完全控制」，' + $script:NL +
-                 '但连 takeown / icacls 都被拒绝 —— 这是过滤驱动在拦。' + $script:NL + $script:NL +
-                 '细分测试：' + $capText + $script:NL + $script:NL +
-                 $why +
-                 '是否尝试【临时结束这些保护进程 + 停止希沃服务】后再写？' + $script:NL +
-                 '（360 等软件通常会自己重新拉起，但写入窗口期足够）'),
-                '检测到保护，是否强行尝试', 'OKCancel', 'Warning')
+                ('写入被拦截了：新建文件=' + $diag.FileOk + '，新建目录=' + $diag.DirOk + '。' + $script:NL + $script:NL +
+                 '拦截者是希沃的内核驱动（SeewoZoroWall / SeewoKeLiteLady），' + $script:NL +
+                 'ACL 里管理员已是完全控制，但连 takeown 都被拒绝。' + $script:NL + $script:NL +
+                 '先试一次【结束保护进程 + 停希沃服务】？'),
+                '写入被驱动拦截', 'OKCancel', 'Warning')
 
             if ($ans -eq 'OK') {
                 Set-Status '正在尝试结束保护进程…'
@@ -970,7 +1129,56 @@ $btnInstall.add_Click({
             }
         }
 
-        # ---------- 4. 仍不可写 → 导出保底 ----------
+        # ---------- 3b. 仍不可写 → 安全模式自动安装 ----------
+        if (-not $writable) {
+            $isSafe = Test-IsSafeMode
+            if ($isSafe) {
+                throw ('当前已在安全模式下，但目录仍不可写。' + $script:NL +
+                    '这可能意味着还有其它保护（如杀软驱动）。请把日志发我。')
+            }
+
+            $pick = [System.Windows.Forms.MessageBox]::Show(
+                ('驱动还在拦，正常模式下无法写入。' + $script:NL + $script:NL +
+                 '【推荐】重启到安全模式自动安装：' + $script:NL +
+                 '  安全模式不加载希沃/杀软的第三方驱动，那时写入一定能成功。' + $script:NL +
+                 '  程序会自动完成：注入 → 关掉安全模式 → 重启回正常。' + $script:NL +
+                 '  并在桌面放一个「退出安全模式.bat」急救（万一卡住可双击恢复）。' + $script:NL + $script:NL +
+                 '点「是」= 立即重启去安全模式自动安装' + $script:NL +
+                 '点「否」= 只把补丁文件导到桌面，我自己手动弄'),
+                '需要安全模式才能写入', 'YesNoCancel', 'Question')
+
+            if ($pick -eq 'Cancel') {
+                Add-Log '用户取消'
+                return
+            }
+
+            if ($pick -eq 'Yes') {
+                try {
+                    Set-Status '正在准备重启到安全模式…'
+                    $recovery = Invoke-EnterSafeModeInstall
+                    Add-Log '已安排安全模式自动安装，10 秒后重启'
+                    [System.Windows.Forms.MessageBox]::Show(
+                        ('已设置好，10 秒后自动重启进入安全模式。' + $script:NL + $script:NL +
+                         '接下来全自动，不用你操作：' + $script:NL +
+                         '  1) 电脑重启进安全模式' + $script:NL +
+                         '  2) 你登录后程序自动运行并完成注入' + $script:NL +
+                         '  3) 自动关掉安全模式并重启回正常' + $script:NL + $script:NL +
+                         '急救：万一卡在安全模式，双击桌面的「退出安全模式.bat」即可恢复。'),
+                        '即将重启', 'OK', 'Information') | Out-Null
+                    return
+                } catch {
+                    Add-Log ('设置安全模式失败: ' + $_.Exception.Message)
+                    [System.Windows.Forms.MessageBox]::Show(
+                        ('无法设置安全模式：' + $_.Exception.Message + $script:NL + $script:NL +
+                         '请尝试手动：Win+R 输入 msconfig → 引导 → 安全引导 → 最小 → 重启。'),
+                        '设置失败', 'OK', 'Error') | Out-Null
+                    return
+                }
+            }
+            # 选「否」→ 走下面的导出流程
+        }
+
+# ---------- 4. 仍不可写 → 导出保底 ----------
         if (-not $writable) {
             Add-Log '仍不可写，改为导出补丁文件'
             $exported = Export-PatchedAsar -Bytes ([System.IO.File]::ReadAllBytes($staged))
@@ -1228,5 +1436,16 @@ $form.add_Shown({
         $btnInstall.Focus()
     }
 })
+
+# 安全模式自动安装：由 RunOnce 在安全模式登录时带 -SafeInstall 调起
+if ($args -contains '-SafeInstall') {
+    try {
+        Initialize-InstallerLog
+        Add-LogFacts
+        Add-Log ('安全模式: ' + (Test-IsSafeMode))
+    } catch { }
+    [void](Invoke-SafeModeAutoInstall)
+    exit 0
+}
 
 [void]$form.ShowDialog()
