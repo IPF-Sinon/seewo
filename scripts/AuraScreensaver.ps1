@@ -247,6 +247,23 @@ function Get-SeewoDirCandidates {
     $found = New-Object System.Collections.ArrayList
     $seen = @{}
 
+    # ★ 最高优先级：正在运行的管家进程能给出真实 exe 路径。
+    #   安装目录形如 Program Files (x86)SeewoSeewoServiceSeewoService_<版本>SeewoServiceAssistant，
+    #   其中版本号每次升级都会变，所以这里用进程路径兜住「通配符也没命中」的情况。
+    try {
+        foreach ($proc in @(Get-Process -Name "SeewoServiceAssistant" -ErrorAction SilentlyContinue)) {
+            $exePath = $null
+            try { $exePath = $proc.Path } catch { $exePath = $null }
+            if ($exePath) {
+                $procDir = Split-Path -Parent $exePath
+                if (-not $seen.ContainsKey($procDir) -and (Test-SeewoDir -Dir $procDir)) {
+                    $seen[$procDir] = $true
+                    [void]$found.Add($procDir)
+                }
+            }
+        }
+    } catch { }
+
     foreach ($pattern in $script:SearchPatterns) {
         # 通配符目录搜索：只展开「目录」层级，不做全盘遍历
         try {

@@ -230,9 +230,15 @@ $form.Controls.Add($btnUninstall)
 
 $btnLog = New-Object System.Windows.Forms.Button
 $btnLog.Text = '查看日志'
-$btnLog.Location = New-Object System.Drawing.Point(506, 512)
-$btnLog.Size = New-Object System.Drawing.Size(100, 32)
+$btnLog.Location = New-Object System.Drawing.Point(452, 512)
+$btnLog.Size = New-Object System.Drawing.Size(90, 32)
 $form.Controls.Add($btnLog)
+
+$btnDiag = New-Object System.Windows.Forms.Button
+$btnDiag.Text = '诊断'
+$btnDiag.Location = New-Object System.Drawing.Point(548, 512)
+$btnDiag.Size = New-Object System.Drawing.Size(68, 32)
+$form.Controls.Add($btnDiag)
 
 $lblStatus = New-Object System.Windows.Forms.Label
 $lblStatus.Location = New-Object System.Drawing.Point(16, 560)
@@ -475,6 +481,42 @@ function Start-Installer {
 $btnInstall.add_Click({ Start-Installer })
 $btnUninstall.add_Click({ Start-Installer -UninstallNow })
 
+$btnDiag.add_Click({
+    $lines = @()
+    $lines += '配置文件：' + $script:ConfigPath
+    $lines += '配置存在：' + (Test-Path -LiteralPath $script:ConfigPath)
+
+    $lines += ''
+    if (Get-Command Resolve-SeewoDirEmbedded -ErrorAction SilentlyContinue) {
+        $d = Resolve-SeewoDirEmbedded
+        if ($d) {
+            $lines += '安装目录：' + $d
+            $asar = Join-Path $d 'resources\app.asar'
+            $lines += 'app.asar：' + (Test-Path -LiteralPath $asar)
+            $lines += '备份 .bak：' + (Test-Path -LiteralPath ($asar + '.bak'))
+        } else {
+            $lines += '安装目录：未找到'
+        }
+    } else {
+        $lines += '安装目录探测：脚本版不探测（点「安装注入」时由安装器定位）'
+    }
+
+    $lines += ''
+    $lines += 'command.json：' + (Test-Path -LiteralPath $script:CommandPath)
+    $lines += 'command-result.json：' + (Test-Path -LiteralPath $script:ResultPath)
+    $lines += '加载器日志：' + (Test-Path -LiteralPath $script:LogPath)
+
+    $lines += ''
+    $lines += '希沃管家进程：'
+    $procs = @(Get-Process -Name 'SeewoServiceAssistant' -ErrorAction SilentlyContinue)
+    if ($procs.Count -gt 0) {
+        $lines += ('  运行中，PID=' + $procs[0].Id)
+    } else {
+        $lines += '  未运行（未运行时加载器不在，预览一定超时）'
+    }
+
+    [System.Windows.Forms.MessageBox]::Show(($lines -join $script:NL), '诊断信息', 'OK', 'Information') | Out-Null
+})
 $btnLog.add_Click({
     if (Test-Path -LiteralPath $script:LogPath) {
         Start-Process notepad.exe -ArgumentList ('"' + $script:LogPath + '"')
@@ -493,6 +535,11 @@ try {
 }
 
 $existsText = '配置文件尚不存在（保存后创建）'
+if (Get-Command Resolve-SeewoDirEmbedded -ErrorAction SilentlyContinue) {
+    $d0 = Resolve-SeewoDirEmbedded
+    if ($d0) { $existsText = $existsText + $script:NL + "安装目录：" + $d0 }
+    else { $existsText = $existsText + $script:NL + "安装目录：未自动找到，点「安装注入」时可手动选择" }
+}
 if (Test-Path -LiteralPath $script:ConfigPath) { $existsText = '配置文件：' + $script:ConfigPath }
 Set-Status ($existsText + $script:NL + '提示：改完先「保存配置」，再点「立即预览屏保」看效果。')
 
