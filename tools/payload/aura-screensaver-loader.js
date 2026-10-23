@@ -742,7 +742,15 @@
         matched++;
         if (matched <= 3) log.info(label + '：候选模块 ' + id + '（含特征 ' + needle + '）');
         var cand = null;
-        try { cand = req(Number(id)); } catch (e) { continue; }
+        try {
+          cand = req(Number(id));
+        } catch (e) {
+          // ★ 别静默吞掉：依赖链没就绪时 req() 会抛（例如模块 24 的原生绑定），
+          //   这正是「有候选但都不满足形状」的真实原因。记下来便于诊断。
+          lastFailedId = id;
+          lastFailedKeys = 'req() 抛错 -> ' + (e && e.message || e);
+          continue;
+        }
         if (!validator(cand)) {
           lastFailedId = id;
           try {
@@ -761,7 +769,7 @@
       else log.warn(label + '：有 ' + matched + ' 个候选，但都不满足形状要求');
 
         if (lastFailedId !== null) {
-          log.warn(label + '：候选 ' + lastFailedId + ' 的导出键 = ' + lastFailedKeys);
+          log.warn(label + '：候选 ' + lastFailedId + ' 诊断 = ' + lastFailedKeys);
         }
     } catch (e) { log.warn(label + '扫描异常: ' + (e && e.message || e)); }
     return null;
@@ -769,14 +777,14 @@
 
   function resolveController(req, log) {
     var c = null;
-    try { c = req(120); } catch (e) { }
+    try { c = req(120); } catch (e) { log.debug('req(120) 抛错: ' + (e && e.message || e)); }
     if (looksLikeScreensaver(c)) return unwrapExport(c) || c;
     return resolveByScan(req, 'screensaverTransitionList', looksLikeScreensaver, log, '屏保控制器');
   }
 
   function resolveWindowManager(req, log) {
     var w = null;
-    try { w = req(69); } catch (e) { }
+    try { w = req(69); } catch (e) { log.debug('req(69) 抛错: ' + (e && e.message || e)); }
     if (looksLikeWindowManager(w)) return unwrapExport(w) || w;
     return resolveByScan(req, 'resetWindow', looksLikeWindowManager, log, '窗口管理器');
   }
