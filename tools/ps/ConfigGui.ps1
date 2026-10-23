@@ -251,167 +251,206 @@ function Invoke-Preview {
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = '希沃屏保配置'
-# 尺寸收敛到屏幕工作区，避免小屏/高缩放下超出屏幕
-$wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-$wantW = 660
-$wantH = 760
-if ($wantW -gt ($wa.Width - 40)) { $wantW = $wa.Width - 40 }
-if ($wantH -gt ($wa.Height - 40)) { $wantH = $wa.Height - 40 }
-if ($wantW -lt 420) { $wantW = 420 }
-if ($wantH -lt 360) { $wantH = 360 }
-$form.Size = New-Object System.Drawing.Size($wantW, $wantH)
-$form.MinimumSize = New-Object System.Drawing.Size(420, 360)
 $form.StartPosition = 'CenterScreen'
 $form.FormBorderStyle = 'Sizable'
 $form.MaximizeBox = $true
-$form.AutoScroll = $true
 $form.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
 
+# 尺寸收敛到屏幕工作区，避免小屏/高缩放下超出屏幕
+$wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+$wantW = 680
+$wantH = 780
+if ($wantW -gt ($wa.Width - 40)) { $wantW = $wa.Width - 40 }
+if ($wantH -gt ($wa.Height - 40)) { $wantH = $wa.Height - 40 }
+if ($wantW -lt 460) { $wantW = 460 }
+if ($wantH -lt 380) { $wantH = 380 }
+$form.Size = New-Object System.Drawing.Size($wantW, $wantH)
+$form.MinimumSize = New-Object System.Drawing.Size(460, 380)
+
+# ---- 顶部：状态区（自适应高度，长路径自动换行）----
+$panelTop = New-Object System.Windows.Forms.Panel
+$panelTop.Dock = 'Top'
+$panelTop.AutoSize = $true
+$panelTop.AutoSizeMode = 'GrowAndShrink'
+$panelTop.Padding = New-Object System.Windows.Forms.Padding(10, 8, 10, 8)
+
 $lblStatus = New-Object System.Windows.Forms.Label
-$lblStatus.Location = New-Object System.Drawing.Point(16, 12)
-$lblStatus.Size = New-Object System.Drawing.Size(610, 86)
+$lblStatus.AutoSize = $true
+$lblStatus.Dock = 'Top'
+$lblStatus.MaximumSize = New-Object System.Drawing.Size(620, 0)
 $lblStatus.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 10)
-$form.Controls.Add($lblStatus)
+$lblStatus.Text = ''
+$panelTop.Controls.Add($lblStatus)
 
-# ---- 未注入：唯一按钮 ----
-$btnInstall = New-Object System.Windows.Forms.Button
-$btnInstall.Text = '一键安装'
-$btnInstall.Location = New-Object System.Drawing.Point(16, 108)
-$btnInstall.Size = New-Object System.Drawing.Size(610, 52)
-$btnInstall.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 12, [System.Drawing.FontStyle]::Bold)
-$form.Controls.Add($btnInstall)
+# ---- 底部：按钮栏（固定，永远可见）----
+$panelBottom = New-Object System.Windows.Forms.Panel
+$panelBottom.Dock = 'Bottom'
+$panelBottom.Height = 64
 
-# ---- 已注入：配置面板 ----
-$group = New-Object System.Windows.Forms.GroupBox
-$group.Text = '屏保配置'
-$group.Location = New-Object System.Drawing.Point(16, 104)
-$group.Size = New-Object System.Drawing.Size(610, 486)
-$group.Visible = $false
-$form.Controls.Add($group)
+$flowBottom = New-Object System.Windows.Forms.FlowLayoutPanel
+$flowBottom.Dock = 'Fill'
+$flowBottom.FlowDirection = 'LeftToRight'
+$flowBottom.WrapContents = $false
+$flowBottom.Padding = New-Object System.Windows.Forms.Padding(10, 12, 10, 8)
+$panelBottom.Controls.Add($flowBottom)
 
-$chkEnabled = New-Object System.Windows.Forms.CheckBox
-$chkEnabled.Text = '启用屏保（关闭后，集控再下发也不会弹出）'
-$chkEnabled.Location = New-Object System.Drawing.Point(14, 26)
-$chkEnabled.Size = New-Object System.Drawing.Size(460, 22)
-$group.Controls.Add($chkEnabled)
-
-$chkLock = New-Object System.Windows.Forms.CheckBox
-$chkLock.Text = '关闭屏保后自动锁屏（建议不勾）'
-$chkLock.Location = New-Object System.Drawing.Point(14, 52)
-$chkLock.Size = New-Object System.Drawing.Size(460, 22)
-$group.Controls.Add($chkLock)
-
-$chkOverride = New-Object System.Windows.Forms.CheckBox
-$chkOverride.Text = '使用自定义图集（不勾选 = 沿用集控下发的图片与文案）'
-$chkOverride.Location = New-Object System.Drawing.Point(14, 84)
-$chkOverride.Size = New-Object System.Drawing.Size(540, 22)
-$group.Controls.Add($chkOverride)
-
-$lblSource = New-Object System.Windows.Forms.Label
-$lblSource.Text = '素材来源'
-$lblSource.Location = New-Object System.Drawing.Point(14, 116)
-$lblSource.Size = New-Object System.Drawing.Size(70, 20)
-$group.Controls.Add($lblSource)
-
-$txtSource = New-Object System.Windows.Forms.TextBox
-$txtSource.Location = New-Object System.Drawing.Point(90, 113)
-$txtSource.Size = New-Object System.Drawing.Size(500, 24)
-$group.Controls.Add($txtSource)
-
-$lblInterval = New-Object System.Windows.Forms.Label
-$lblInterval.Text = '切换间隔（秒）'
-$lblInterval.Location = New-Object System.Drawing.Point(14, 150)
-$lblInterval.Size = New-Object System.Drawing.Size(90, 20)
-$group.Controls.Add($lblInterval)
-
-$numInterval = New-Object System.Windows.Forms.NumericUpDown
-$numInterval.Location = New-Object System.Drawing.Point(108, 147)
-$numInterval.Size = New-Object System.Drawing.Size(80, 24)
-$numInterval.Minimum = 1
-$numInterval.Maximum = 3600
-$numInterval.Value = 15
-$group.Controls.Add($numInterval)
-
-$lblFit = New-Object System.Windows.Forms.Label
-$lblFit.Text = '图片适配'
-$lblFit.Location = New-Object System.Drawing.Point(220, 150)
-$lblFit.Size = New-Object System.Drawing.Size(60, 20)
-$group.Controls.Add($lblFit)
-
-$rbContain = New-Object System.Windows.Forms.RadioButton
-$rbContain.Text = '留边完整显示'
-$rbContain.Location = New-Object System.Drawing.Point(290, 148)
-$rbContain.Size = New-Object System.Drawing.Size(120, 22)
-$group.Controls.Add($rbContain)
-
-$rbCover = New-Object System.Windows.Forms.RadioButton
-$rbCover.Text = '裁剪铺满'
-$rbCover.Location = New-Object System.Drawing.Point(420, 148)
-$rbCover.Size = New-Object System.Drawing.Size(100, 22)
-$group.Controls.Add($rbCover)
-
-$lblImages = New-Object System.Windows.Forms.Label
-$lblImages.Text = '图片列表（每行一个完整路径）'
-$lblImages.Location = New-Object System.Drawing.Point(14, 184)
-$lblImages.Size = New-Object System.Drawing.Size(300, 20)
-$group.Controls.Add($lblImages)
-
-$txtImages = New-Object System.Windows.Forms.TextBox
-$txtImages.Location = New-Object System.Drawing.Point(14, 206)
-$txtImages.Size = New-Object System.Drawing.Size(576, 96)
-$txtImages.Multiline = $true
-$txtImages.ScrollBars = 'Vertical'
-$txtImages.AcceptsReturn = $true
-$group.Controls.Add($txtImages)
-
-$lblTexts = New-Object System.Windows.Forms.Label
-$lblTexts.Text = '图文条目（每行：内容|出处，出处可省略）'
-$lblTexts.Location = New-Object System.Drawing.Point(14, 310)
-$lblTexts.Size = New-Object System.Drawing.Size(340, 20)
-$group.Controls.Add($lblTexts)
-
-$txtTexts = New-Object System.Windows.Forms.TextBox
-$txtTexts.Location = New-Object System.Drawing.Point(14, 332)
-$txtTexts.Size = New-Object System.Drawing.Size(576, 70)
-$txtTexts.Multiline = $true
-$txtTexts.ScrollBars = 'Vertical'
-$txtTexts.AcceptsReturn = $true
-$group.Controls.Add($txtTexts)
-
-$lblTrans = New-Object System.Windows.Forms.Label
-$lblTrans.Text = '转场效果（可选，每行一个 0-6；留空自动随机）'
-$lblTrans.Location = New-Object System.Drawing.Point(14, 410)
-$lblTrans.Size = New-Object System.Drawing.Size(400, 20)
-$group.Controls.Add($lblTrans)
-
-$txtTrans = New-Object System.Windows.Forms.TextBox
-$txtTrans.Location = New-Object System.Drawing.Point(14, 432)
-$txtTrans.Size = New-Object System.Drawing.Size(140, 24)
-$group.Controls.Add($txtTrans)
-
-# ---- 已注入：两个操作按钮 ----
 $btnSavePreview = New-Object System.Windows.Forms.Button
 $btnSavePreview.Text = '保存并预览'
-$btnSavePreview.Location = New-Object System.Drawing.Point(16, 604)
-$btnSavePreview.Size = New-Object System.Drawing.Size(300, 42)
+$btnSavePreview.Size = New-Object System.Drawing.Size(210, 38)
 $btnSavePreview.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 10, [System.Drawing.FontStyle]::Bold)
-$btnSavePreview.Visible = $false
-$form.Controls.Add($btnSavePreview)
+$flowBottom.Controls.Add($btnSavePreview)
 
 $btnUninstall = New-Object System.Windows.Forms.Button
 $btnUninstall.Text = '卸载还原'
-$btnUninstall.Location = New-Object System.Drawing.Point(330, 604)
-$btnUninstall.Size = New-Object System.Drawing.Size(180, 42)
-$btnUninstall.Visible = $false
-$form.Controls.Add($btnUninstall)
+$btnUninstall.Size = New-Object System.Drawing.Size(140, 38)
+$flowBottom.Controls.Add($btnUninstall)
 
 $linkLog = New-Object System.Windows.Forms.LinkLabel
 $linkLog.Text = '查看日志'
-$linkLog.Location = New-Object System.Drawing.Point(522, 616)
-$linkLog.Size = New-Object System.Drawing.Size(100, 20)
-$linkLog.Visible = $false
-$form.Controls.Add($linkLog)
+$linkLog.AutoSize = $true
+$linkLog.Margin = New-Object System.Windows.Forms.Padding(14, 12, 3, 3)
+$flowBottom.Controls.Add($linkLog)
+$script:PanelBottom = $panelBottom
 
+# ---- 中间：可滚动区 ----
+$panelMain = New-Object System.Windows.Forms.Panel
+$panelMain.Dock = 'Fill'
+$panelMain.AutoScroll = $true
+$panelMain.Padding = New-Object System.Windows.Forms.Padding(10, 6, 10, 6)
+
+$btnInstall = New-Object System.Windows.Forms.Button
+$btnInstall.Text = '一键安装'
+$btnInstall.Dock = 'Top'
+$btnInstall.Height = 56
+$btnInstall.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 12, [System.Drawing.FontStyle]::Bold)
+$panelMain.Controls.Add($btnInstall)
+
+# 配置区：TableLayoutPanel（标签自适应，输入框填满剩余宽度）
+#   ★ 用表格布局代替绝对坐标，高 DPI / 不同字号下都不会截断或重叠。
+$table = New-Object System.Windows.Forms.TableLayoutPanel
+$table.Dock = 'Top'
+$table.AutoSize = $true
+$table.AutoSizeMode = 'GrowAndShrink'
+$table.ColumnCount = 2
+$table.Padding = New-Object System.Windows.Forms.Padding(4, 8, 4, 8)
+[void]$table.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
+[void]$table.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+$panelMain.Controls.Add($table)
+$group = $table
+
+function New-AuraRowLabel {
+    param([string]$Text)
+    $l = New-Object System.Windows.Forms.Label
+    $l.Text = $Text
+    $l.AutoSize = $true
+    $l.Anchor = 'Left'
+    $l.Margin = New-Object System.Windows.Forms.Padding(3, 7, 10, 3)
+    return $l
+}
+
+$chkEnabled = New-Object System.Windows.Forms.CheckBox
+$chkEnabled.Text = '启用屏保（关闭后，集控再下发也不会弹出）'
+$chkEnabled.AutoSize = $true
+$chkEnabled.Margin = New-Object System.Windows.Forms.Padding(3, 6, 3, 2)
+$table.Controls.Add($chkEnabled)
+$table.SetColumnSpan($chkEnabled, 2)
+
+$chkLock = New-Object System.Windows.Forms.CheckBox
+$chkLock.Text = '关闭屏保后自动锁屏（建议不勾）'
+$chkLock.AutoSize = $true
+$chkLock.Margin = New-Object System.Windows.Forms.Padding(3, 2, 3, 8)
+$table.Controls.Add($chkLock)
+$table.SetColumnSpan($chkLock, 2)
+
+$lblSection = New-AuraRowLabel '自定义图集'
+$lblSection.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9, [System.Drawing.FontStyle]::Bold)
+$lblSection.Margin = New-Object System.Windows.Forms.Padding(3, 10, 3, 4)
+$table.Controls.Add($lblSection)
+$table.SetColumnSpan($lblSection, 2)
+
+$chkOverride = New-Object System.Windows.Forms.CheckBox
+$chkOverride.Text = '使用自定义图集（不勾选 = 沿用集控下发的图片与文案）'
+$chkOverride.AutoSize = $true
+$chkOverride.Margin = New-Object System.Windows.Forms.Padding(3, 2, 3, 6)
+$table.Controls.Add($chkOverride)
+$table.SetColumnSpan($chkOverride, 2)
+
+$table.Controls.Add((New-AuraRowLabel '素材来源'))
+$txtSource = New-Object System.Windows.Forms.TextBox
+$txtSource.Anchor = 'Left,Right'
+$txtSource.Margin = New-Object System.Windows.Forms.Padding(3, 4, 3, 4)
+$table.Controls.Add($txtSource)
+
+$table.Controls.Add((New-AuraRowLabel '切换间隔（秒）'))
+$numInterval = New-Object System.Windows.Forms.NumericUpDown
+$numInterval.Width = 90
+$numInterval.Minimum = 1
+$numInterval.Maximum = 3600
+$numInterval.Value = 15
+$numInterval.Anchor = 'Left'
+$numInterval.Margin = New-Object System.Windows.Forms.Padding(3, 4, 3, 4)
+$table.Controls.Add($numInterval)
+
+$table.Controls.Add((New-AuraRowLabel '图片适配'))
+$flowFit = New-Object System.Windows.Forms.FlowLayoutPanel
+$flowFit.AutoSize = $true
+$flowFit.WrapContents = $false
+$flowFit.Margin = New-Object System.Windows.Forms.Padding(0)
+$table.Controls.Add($flowFit)
+
+$rbContain = New-Object System.Windows.Forms.RadioButton
+$rbContain.Text = '留边完整显示'
+$rbContain.AutoSize = $true
+$rbContain.Checked = $true
+$rbContain.Margin = New-Object System.Windows.Forms.Padding(3, 4, 12, 4)
+$flowFit.Controls.Add($rbContain)
+
+$rbCover = New-Object System.Windows.Forms.RadioButton
+$rbCover.Text = '裁剪铺满'
+$rbCover.AutoSize = $true
+$rbCover.Margin = New-Object System.Windows.Forms.Padding(3, 4, 3, 4)
+$flowFit.Controls.Add($rbCover)
+
+$table.Controls.Add((New-AuraRowLabel '图片列表'))
+$txtImages = New-Object System.Windows.Forms.TextBox
+$txtImages.Multiline = $true
+$txtImages.ScrollBars = 'Vertical'
+$txtImages.AcceptsReturn = $true
+$txtImages.Height = 96
+$txtImages.Anchor = 'Left,Right'
+$txtImages.Margin = New-Object System.Windows.Forms.Padding(3, 4, 3, 4)
+$table.Controls.Add($txtImages)
+
+$table.Controls.Add((New-AuraRowLabel '图文条目'))
+$txtTexts = New-Object System.Windows.Forms.TextBox
+$txtTexts.Multiline = $true
+$txtTexts.ScrollBars = 'Vertical'
+$txtTexts.AcceptsReturn = $true
+$txtTexts.Height = 70
+$txtTexts.Anchor = 'Left,Right'
+$txtTexts.Margin = New-Object System.Windows.Forms.Padding(3, 4, 3, 4)
+$table.Controls.Add($txtTexts)
+
+$table.Controls.Add((New-AuraRowLabel '转场效果'))
+$txtTrans = New-Object System.Windows.Forms.TextBox
+$txtTrans.Width = 130
+$txtTrans.Anchor = 'Left'
+$txtTrans.Margin = New-Object System.Windows.Forms.Padding(3, 4, 3, 4)
+$table.Controls.Add($txtTrans)
+
+# 顶部 / 底部 / 填充 的添加顺序（Fill 最后加，避免盖住其它面板）
+$form.Controls.Add($panelTop)
+$form.Controls.Add($panelBottom)
+$form.Controls.Add($panelMain)
+
+# 让状态区在窗口变窄时仍能完整换行显示
+$form.add_Resize({
+    try {
+        $w = $form.ClientSize.Width - 40
+        if ($w -lt 260) { $w = 260 }
+        $lblStatus.MaximumSize = New-Object System.Drawing.Size($w, 0)
+    } catch { }
+})
 function Set-Status {
     param([string]$Text)
     $lblStatus.Text = $Text
@@ -1808,73 +1847,6 @@ if (($args -contains '-SafeInstall') -or ($args -contains '-SafeUninstall')) {
     exit 0
 }
 
-# ---------------------------------------------------------------------------
-# 自适应布局：顶部状态 / 中间可滚动 / 底部固定按钮栏
-#   这样无论缩放多大、窗口多小，按钮永远在可见区域内。
-# ---------------------------------------------------------------------------
-
-$panelTop = New-Object System.Windows.Forms.Panel
-$panelTop.Dock = 'Top'
-$panelTop.Height = 104
-
-$panelBottom = New-Object System.Windows.Forms.Panel
-$panelBottom.Dock = 'Bottom'
-$panelBottom.Height = 66
-
-$panelMain = New-Object System.Windows.Forms.Panel
-$panelMain.Dock = 'Fill'
-$panelMain.AutoScroll = $true
-
-# 先把控件从窗体搬到面板（顺序：Top / Bottom / Fill）
-$form.Controls.Remove($lblStatus)
-$panelTop.Controls.Add($lblStatus)
-$lblStatus.Location = New-Object System.Drawing.Point(8, 6)
-$lblStatus.Size = New-Object System.Drawing.Size(620, 92)
-
-$form.Controls.Remove($btnSavePreview)
-$form.Controls.Remove($btnUninstall)
-$form.Controls.Remove($linkLog)
-$panelBottom.Controls.Add($btnSavePreview)
-$panelBottom.Controls.Add($btnUninstall)
-$panelBottom.Controls.Add($linkLog)
-$btnSavePreview.Location = New-Object System.Drawing.Point(8, 12)
-$btnSavePreview.Size = New-Object System.Drawing.Size(220, 42)
-$btnUninstall.Location = New-Object System.Drawing.Point(238, 12)
-$btnUninstall.Size = New-Object System.Drawing.Size(150, 42)
-$linkLog.Location = New-Object System.Drawing.Point(400, 22)
-$linkLog.Size = New-Object System.Drawing.Size(110, 22)
-
-$form.Controls.Remove($btnInstall)
-$form.Controls.Remove($group)
-$panelMain.Controls.Add($btnInstall)
-$panelMain.Controls.Add($group)
-$btnInstall.Location = New-Object System.Drawing.Point(10, 10)
-$btnInstall.Size = New-Object System.Drawing.Size(600, 52)
-$group.Location = New-Object System.Drawing.Point(10, 10)
-$group.Size = New-Object System.Drawing.Size(596, 486)
-
-# 宽度自适应：窗口拉宽时让配置区跟着变宽（避免出现横向滚动条）
-function Update-AuraLayout {
-    try {
-        $w = $panelMain.ClientSize.Width - 30
-        if ($w -lt 420) { $w = 420 }
-        if ($w -gt 980) { $w = 980 }
-        $btnInstall.Width = $w
-        $group.Width = $w
-        $inner = $w - 32
-        $txtSource.Width = $inner - 78
-        $txtImages.Width = $inner
-        $txtTexts.Width = $inner
-        $numInterval.Width = 80
-    } catch { }
-}
-$panelMain.add_Resize({ Update-AuraLayout })
-
-$form.Controls.Add($panelTop)
-$form.Controls.Add($panelBottom)
-$form.Controls.Add($panelMain)
-$script:PanelBottom = $panelBottom
 
 
-Update-AuraLayout
 [void]$form.ShowDialog()
