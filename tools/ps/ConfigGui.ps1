@@ -338,6 +338,12 @@ $btnInstall.Height = 56
 $btnInstall.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 12, [System.Drawing.FontStyle]::Bold)
 $panelMain.Controls.Add($btnInstall)
 
+$btnImageSwap = New-Object System.Windows.Forms.Button
+$btnImageSwap.Text = '临时换图（免安装 · 只改图片，不改程序）'
+$btnImageSwap.Dock = 'Top'
+$btnImageSwap.Height = 44
+$panelMain.Controls.Add($btnImageSwap)
+
 # 配置区：TableLayoutPanel（标签自适应，输入框填满剩余宽度）
 #   ★ 用表格布局代替绝对坐标，高 DPI / 不同字号下都不会截断或重叠。
 $table = New-Object System.Windows.Forms.TableLayoutPanel
@@ -627,6 +633,7 @@ function Refresh-UiState {
     if ($st.Injected) {
         $group.Visible = $true
         $btnInstall.Visible = $false
+        $btnImageSwap.Visible = $false
         $btnSavePreview.Visible = $true
         $btnUninstall.Visible = $true
         $linkLog.Visible = $true
@@ -648,6 +655,7 @@ function Refresh-UiState {
         $linkLog.Visible = $false
         if ($script:PanelBottom) { $script:PanelBottom.Visible = $false }
         $btnInstall.Visible = $true
+        $btnImageSwap.Visible = $true
 
         if (-not $st.AsarExists) {
             if ($st.Error) {
@@ -1066,6 +1074,221 @@ function Set-FileContentFrom {
 }
 
 # ---------------------------------------------------------------------------
+# 如果在安全模式里完成安装/卸载：清除 safeboot 并自动重启回正常模式
+#   ★ 之前漏了这步：用户在安全模式里手动点安装也能成功，
+#     但之后不会自动恢复，会一直卡在安全模式。
+# ---------------------------------------------------------------------------
+# 免安装模式：直接替换希沃缓存的屏保图片（思路同「狸猫换太子.bat」）
+#   目标目录 %APPDATA%\seewo\SeewoAbility\screen_saver\ 里是哈希命名的图片文件。
+#   这里只改这些图片文件，不碰 Program Files、不需要注入、不需要安全模式。
+# ---------------------------------------------------------------------------
+
+function Get-ScreenSaverDir {
+    $p = Join-Path $env:APPDATA 'seewo\SeewoAbility\screen_saver'
+    return $p
+}
+
+function Get-ScreenSaverImageFiles {
+    param([string]$Dir)
+    if (-not (Test-Path -LiteralPath $Dir)) { return @() }
+    return @(Get-ChildItem -LiteralPath $Dir -File -ErrorAction SilentlyContinue)
+}
+
+function Backup-ScreenSaverDir {
+    param([string]$Dir)
+    $parent = Split-Path -Parent $Dir
+    $name = 'screen_saver_backup_' + (Get-Date).ToString('yyyyMMdd_HHmmss')
+    $bak = Join-Path $parent $name
+    Copy-Item -LiteralPath $Dir -Destination $bak -Recurse -Force -ErrorAction Stop
+    return $bak
+}
+
+function Test-ImageFile {
+    param([string]$Path)
+    $ext = [System.IO.Path]::GetExtension($Path).ToLower()
+    return (@('.jpg', '.jpeg', '.png', '.bmp') -contains $ext)
+}
+
+# 循环把源图片覆盖到目标文件上（保留目标文件名，行为与 bat 一致）
+function Apply-ScreenSaverImages {
+    param([string]$Dir, [string]$SourceDir)
+
+    if (-not (Test-Path -LiteralPath $Dir)) { throw ('找不到屏保目录：' + $Dir) }
+    if (-not (Test-Path -LiteralPath $SourceDir)) { throw ('找不到图片文件夹：' + $SourceDir) }
+
+    $srcs = @(Get-ChildItem -LiteralPath $SourceDir -File -ErrorAction Stop | Where-Object { Test-ImageFile $_.FullName } | Sort-Object Name)
+    if ($srcs.Count -eq 0) { throw '你选择的文件夹里没有 jpg/png 图片' }
+
+    $targets = Get-ScreenSaverImageFiles -Dir $Dir
+    if ($targets.Count -eq 0) { throw '目标屏保目录里没有文件（希沃还没下载过屏保？）' }
+
+    $bak = Backup-ScreenSaverDir -Dir $Dir
+    $i = 0
+    foreach ($t in $targets) {
+        $src = $srcs[$i % $srcs.Count]
+        Copy-Item -LiteralPath $src.FullName -Destination $t.FullName -Force -ErrorAction Stop
+        $i++
+    }
+    return [pscustomobject]@{ Replaced = $targets.Count; Backup = $bak; Source = $srcs.Count }
+}
+
+function Get-LatestScreenSaverBackup {
+    param([string]$Dir)
+    $parent = Split-Path -Parent $Dir
+    if (-not (Test-Path -LiteralPath $parent)) { return $null }
+    $dirs = @(Get-ChildItem -LiteralPath $parent -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like 'screen_saver_backup_*' } |
+        Sort-Object LastWriteTime -Descending)
+    if ($dirs.Count -eq 0) { return $null }
+    return $dirs[0].FullName
+}
+
+function Restore-ScreenSaverBackup {
+    param([string]$Dir)
+    $bak = Get-LatestScreenSaverBackup -Dir $Dir
+    if (-not $bak) { throw '没有找到备份文件夹（形如 screen_saver_backup_...）' }
+    $files = @(Get-ChildItem -LiteralPath $bak -File -ErrorAction SilentlyContinue)
+    if ($files.Count -eq 0) { throw ('备份文件夹是空的：' + $bak) }
+    foreach ($f in $files) {
+        Copy-Item -LiteralPath $f.FullName -Destination (Join-Path $Dir $f.Name) -Force -ErrorAction Stop
+    }
+    return $bak
+}
+
+# 免安装模式的界面
+function Show-ImageSwapDialog {
+    $targetDir = Get-ScreenSaverDir
+
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = '临时换图（免安装）'
+    $dlg.StartPosition = 'CenterParent'
+    $dlg.FormBorderStyle = 'Sizable'
+    $dlg.MinimumSize = New-Object System.Drawing.Size(480, 280)
+    $dlg.Size = New-Object System.Drawing.Size(600, 320)
+    $dlg.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
+
+    $flow = New-Object System.Windows.Forms.FlowLayoutPanel
+    $flow.Dock = 'Top'
+    $flow.AutoSize = $true
+    $flow.FlowDirection = 'TopDown'
+    $flow.WrapContents = $false
+    $flow.Padding = New-Object System.Windows.Forms.Padding(12, 10, 12, 6)
+    $dlg.Controls.Add($flow)
+
+    $lblInfo = New-Object System.Windows.Forms.Label
+    $lblInfo.AutoSize = $true
+    $lblInfo.MaximumSize = New-Object System.Drawing.Size(560, 0)
+    $cnt = (Get-ScreenSaverImageFiles -Dir $targetDir).Count
+    $lblInfo.Text = '这种方式只替换希沃已缓存的屏保图片，不改任何程序文件，' + $script:NL +
+        '所以不需要注入、不需要安全模式，随时可以改回来。' + $script:NL + $script:NL +
+        '图片目录：' + $targetDir + $script:NL +
+        '当前图片数量：' + $cnt
+    $lblInfo.Margin = New-Object System.Windows.Forms.Padding(3, 3, 3, 10)
+    $flow.Controls.Add($lblInfo)
+
+    $btnOpen = New-Object System.Windows.Forms.Button
+    $btnOpen.Text = '打开图片文件夹（看看现在的屏保长什么样）'
+    $btnOpen.AutoSize = $true
+    $btnOpen.Margin = New-Object System.Windows.Forms.Padding(3, 3, 3, 6)
+    $flow.Controls.Add($btnOpen)
+
+    $btnApply = New-Object System.Windows.Forms.Button
+    $btnApply.Text = '选择我的图片并替换（自动备份）'
+    $btnApply.AutoSize = $true
+    $btnApply.Margin = New-Object System.Windows.Forms.Padding(3, 3, 3, 6)
+    $flow.Controls.Add($btnApply)
+
+    $btnRestore = New-Object System.Windows.Forms.Button
+    $btnRestore.Text = '从最近一次备份恢复'
+    $btnRestore.AutoSize = $true
+    $btnRestore.Margin = New-Object System.Windows.Forms.Padding(3, 3, 3, 6)
+    $flow.Controls.Add($btnRestore)
+
+    $btnClose = New-Object System.Windows.Forms.Button
+    $btnClose.Text = '关闭'
+    $btnClose.AutoSize = $true
+    $btnClose.Margin = New-Object System.Windows.Forms.Padding(3, 3, 3, 6)
+    $flow.Controls.Add($btnClose)
+
+    $lblResult = New-Object System.Windows.Forms.Label
+    $lblResult.AutoSize = $true
+    $lblResult.MaximumSize = New-Object System.Drawing.Size(560, 0)
+    $lblResult.ForeColor = [System.Drawing.Color]::DimGray
+    $lblResult.Text = ''
+    $lblResult.Margin = New-Object System.Windows.Forms.Padding(3, 8, 3, 3)
+    $flow.Controls.Add($lblResult)
+
+    $btnOpen.add_Click({
+        try {
+            if (Test-Path -LiteralPath $targetDir) {
+                Start-Process explorer.exe -ArgumentList ('"' + $targetDir + '"')
+            } else {
+                $lblResult.Text = '目录还不存在：' + $targetDir
+            }
+        } catch { $lblResult.Text = '打开失败：' + $_.Exception.Message }
+    })
+
+    $btnApply.add_Click({
+        try {
+            $fb = New-Object System.Windows.Forms.FolderBrowserDialog
+            $fb.Description = '选择放有你自己图片（jpg/png）的文件夹'
+            if ($fb.ShowDialog() -ne 'OK') { return }
+
+            $r = Apply-ScreenSaverImages -Dir $targetDir -SourceDir $fb.SelectedPath
+            $lblResult.Text = '完成：' + $r.Replaced + ' 个文件已替换（循环使用 ' + $r.Source + ' 张图）。' + $script:NL +
+                '备份在：' + $r.Backup + $script:NL +
+                '重启希沃管家（或重启电脑）即可看到新屏保。'
+            [System.Windows.Forms.MessageBox]::Show(
+                ('替换完成。' + $script:NL + $script:NL + '重启希沃管家后生效。' + $script:NL + $script:NL +
+                 '备份位置：' + $r.Backup),
+                '完成', 'OK', 'Information') | Out-Null
+        } catch {
+            $lblResult.Text = '替换失败：' + $_.Exception.Message
+            [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, '替换失败', 'OK', 'Warning') | Out-Null
+        }
+    })
+
+    $btnRestore.add_Click({
+        try {
+            $bak = Restore-ScreenSaverBackup -Dir $targetDir
+            $lblResult.Text = '已从备份恢复：' + $bak
+        } catch {
+            $lblResult.Text = '恢复失败：' + $_.Exception.Message
+            [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, '恢复失败', 'OK', 'Warning') | Out-Null
+        }
+    })
+
+    $btnClose.add_Click({ $dlg.Close() })
+
+    [void]$dlg.ShowDialog($form)
+}
+
+# ---------------------------------------------------------------------------
+
+function Complete-SafeModeIfNeeded {
+    if (-not (Test-IsSafeMode)) { return $false }
+
+    Add-Log '当前处于安全模式：清理 safeboot 并安排重启回正常模式'
+    try {
+        Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' -Name 'AuraScreensaver_SafeInstall' -ErrorAction SilentlyContinue
+    } catch { }
+
+    try { [void](Write-SafeModeRecoveryBat) } catch { }
+
+    try {
+        $o = & bcdedit.exe /deletevalue '{current}' safeboot 2>&1 | Out-String
+        Add-Log ('bcdedit: ' + $o.Trim())
+    } catch { Add-Log ('bcdedit 失败: ' + $_.Exception.Message) }
+
+    try {
+        & shutdown.exe /r /t 20 /c "AuraScreensaver: 已完成，即将重启回正常模式" 2>&1 | Out-Null
+        Add-Log '已安排 20 秒后重启回正常模式'
+    } catch { Add-Log ('安排重启失败: ' + $_.Exception.Message) }
+
+    return $true
+}
+
+# ---------------------------------------------------------------------------
 
 function Test-IsSafeMode {
     try {
@@ -1117,108 +1340,6 @@ function Write-SafeModeRecoveryBat {
     }
 }
 
-# 设置「下次启动进安全模式 + 登录后自动运行本程序完成注入」
-function Invoke-EnterSafeModeInstall {
-    $exe = Get-SelfExePath
-    if (-not $exe) { throw '无法确定自身 exe 路径' }
-
-    $recovery = Write-SafeModeRecoveryBat
-
-    Add-Log '设置 bcdedit safeboot minimal'
-    $out = & bcdedit.exe /set '{current}' safeboot minimal 2>&1 | Out-String
-    Add-Log ('bcdedit 输出: ' + $out.Trim())
-    if ($LASTEXITCODE -ne 0) { throw ('bcdedit 失败，无法进入安全模式。输出：' + $out) }
-
-    Add-Log '写入 RunOnce（安全模式登录后自动运行）'
-    $runOnce = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce'
-    $cmdLine = '"' + $exe + '" -SafeInstall'
-    New-ItemProperty -Path $runOnce -Name 'AuraScreensaver_SafeInstall' -Value $cmdLine -PropertyType String -Force | Out-Null
-    Add-Log ('RunOnce = ' + $cmdLine)
-
-    Add-Log '10 秒后重启'
-    & shutdown.exe /r /t 10 /c "AuraScreensaver: 即将重启进入安全模式并自动完成注入" 2>&1 | Out-Null
-    return $recovery
-}
-
-# 安全模式下自动执行：注入 + 清除 safeboot + 重启回正常
-function Invoke-SafeModeAutoInstall {
-    $log = Join-Path $script:ConfigDir 'install.log'
-    try {
-        if (-not (Test-Path -LiteralPath $script:ConfigDir)) {
-            New-Item -ItemType Directory -Path $script:ConfigDir -Force | Out-Null
-        }
-        $script:InstallLog = $log
-        $script:ExeLog = $null
-        Add-Log '==== 安全模式自动安装开始 ===='
-
-        $dir = Resolve-SeewoDirEmbedded
-        Add-Log ('安装目录: ' + $dir)
-        if (-not $dir) { throw '安全模式下也没找到安装目录' }
-
-        $asar = Join-Path (Join-Path $dir 'resources') 'app.asar'
-        $bak = $asar + '.bak'
-        $info = Read-AsarHeader $asar
-        $leaves = Get-AsarLeaves $info.Header
-        $mainLeaf = $null
-        foreach ($l in $leaves) { if ($l.Rel -eq 'main.js') { $mainLeaf = $l } }
-        $mainText = [System.Text.Encoding]::UTF8.GetString((Get-EntryBytes $info $mainLeaf))
-
-        if ($mainText.Contains($script:MarkBegin)) {
-            Add-Log '已经是注入状态，跳过'
-        } else {
-            $res = Get-PatchedMainJs -Source $mainText -LoaderText $script:LoaderText -ConfigJson $script:DefaultConfigJson
-            $mainBytes = [System.Text.Encoding]::UTF8.GetBytes($res.Text)
-            $stageDir = Join-Path ([System.IO.Path]::GetTempPath()) ('aura-safe-' + [System.Guid]::NewGuid().ToString('N'))
-            New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
-            $staged = Join-Path $stageDir 'app.asar'
-            [void](Save-Asar -Info $info -MainBytes $mainBytes -OutPath $staged)
-            Add-Log ('已组装 asar: ' + (Get-Item $staged).Length + ' 字节')
-
-            if (-not (Test-Path -LiteralPath $bak)) {
-                Copy-Item -LiteralPath $asar -Destination $bak -Force
-                Add-Log '已备份 app.asar.bak'
-            }
-            Copy-Item -LiteralPath $staged -Destination ($asar + '.new') -Force
-            try {
-                if (Test-Path -LiteralPath $asar) { if (-not (Set-FileContentFrom -Source ($asar + '.new') -Target $asar)) { throw '替换 app.asar 失败（三种方式都不可用）' } }
-                else { Move-Item -LiteralPath ($asar + '.new') -Destination $asar -Force }
-                Add-Log '已替换 app.asar'
-            } finally {
-                Remove-Item -LiteralPath ($asar + '.new') -Force -ErrorAction SilentlyContinue
-            }
-            Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction SilentlyContinue
-        }
-
-        Add-Log '清除 RunOnce'
-        Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' -Name 'AuraScreensaver_SafeInstall' -ErrorAction SilentlyContinue
-
-        Add-Log '清除 safeboot（下次正常启动）'
-        $o2 = & bcdedit.exe /deletevalue '{current}' safeboot 2>&1 | Out-String
-        Add-Log ('bcdedit 输出: ' + $o2.Trim())
-
-        Add-Log '注入成功，15 秒后重启回正常模式'
-        & shutdown.exe /r /t 15 /c "AuraScreensaver: 注入完成，即将重启回正常模式" 2>&1 | Out-Null
-        return $true
-    } catch {
-        Add-Log ('安全模式自动安装失败: ' + $_.Exception.Message)
-        Add-Log ('调用栈: ' + $_.ScriptStackTrace)
-        # 失败时也要退出安全模式，避免把机器卡在安全模式
-        try { & bcdedit.exe /deletevalue '{current}' safeboot 2>&1 | Out-Null } catch { }
-        try { Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' -Name 'AuraScreensaver_SafeInstall' -ErrorAction SilentlyContinue } catch { }
-        Add-Log '已撤除安全模式设置，15 秒后重启回正常模式'
-        & shutdown.exe /r /t 15 /c "AuraScreensaver: 注入失败，已恢复正常启动" 2>&1 | Out-Null
-        return $false
-    }
-}
-
-# ---------------------------------------------------------------------------
-# 已知会拦截写入的「保护类」进程
-#   tasklist 显示同时跑了：
-#     ZhuDongFangYu.exe       = 360安全卫士「主动防御」（文件系统过滤驱动）
-#     EasiUpdate3Protect.exe  = 希沃/易学更新保护
-#     SeewoCore.exe           = 希沃核心服务
-#     Sia.Guard.exe           = 希沃守卫
-#   只要这些在跑，ACL 给了管理员完全控制也照样「访问被拒绝」。
 # ---------------------------------------------------------------------------
 
 function Get-SuspectBlockers {
@@ -1568,7 +1689,7 @@ $btnInstall.add_Click({
             if ($pick -eq 'Yes') {
                 try {
                     Set-Status '正在准备重启到安全模式…'
-                    $recovery = Invoke-EnterSafeModeInstall
+                    $recovery = Invoke-EnterSafeModeAction -Action 'install'
                     Add-Log '已安排安全模式自动安装，10 秒后重启'
                     [System.Windows.Forms.MessageBox]::Show(
                         ('已设置好，10 秒后自动重启进入安全模式。' + $script:NL + $script:NL +
@@ -1682,6 +1803,11 @@ $btnInstall.add_Click({
 
         Refresh-UiState -Full
 
+        if (Complete-SafeModeIfNeeded) {
+            [System.Windows.Forms.MessageBox]::Show(('注入完成（加载器就绪: ' + $ready + '）。' + $script:NL + $script:NL + '当前处于安全模式，20 秒后自动重启回正常模式。'), '安装成功', 'OK', 'Information') | Out-Null
+            return
+        }
+
         if ($ready) {
             Add-Log '安装成功'
             [System.Windows.Forms.MessageBox]::Show(
@@ -1721,6 +1847,8 @@ $btnInstall.add_Click({
 # ---------------------------------------------------------------------------
 # 保存并预览
 # ---------------------------------------------------------------------------
+
+$btnImageSwap.add_Click({ Show-ImageSwapDialog })
 
 $btnSavePreview.add_Click({
     try {
@@ -1843,6 +1971,11 @@ $btnUninstall.add_Click({
 
         Set-Status '正在重启希沃管家…'
         [void](Start-Host -Dir $dir)
+
+        if (Complete-SafeModeIfNeeded) {
+            [System.Windows.Forms.MessageBox]::Show(('已还原官方 app.asar。' + $script:NL + $script:NL + '当前处于安全模式，20 秒后自动重启回正常模式。'), '卸载完成', 'OK', 'Information') | Out-Null
+            return
+        }
 
         Refresh-UiState -Full
         [System.Windows.Forms.MessageBox]::Show(

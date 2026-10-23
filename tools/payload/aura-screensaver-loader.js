@@ -680,12 +680,51 @@
     } catch (e) { return ''; }
   }
 
+  /**
+   * 解包导出：兼容三种形态
+   *   1) 直接是实例           { onMessage, startScreensaver }
+   *   2) ES module 包装        { __esModule:true, default: 实例 }
+   *   3) { default: 实例 }（没有 __esModule 标记）
+   */
+  function unwrapExport(v) {
+    if (!v) return null;
+    try {
+      if (v.__esModule && v.default) return v.default;
+      if (v.default && typeof v.default === 'object' && typeof v.onMessage !== 'function') return v.default;
+    } catch (e) { }
+    return v;
+  }
+
+  /** 沿原型链判断这些方法是否都是函数（希沃部分类在构造器里 bind，方法可能在原型上） */
+  function hasAllMethods(obj, names) {
+    if (!obj || (typeof obj !== 'object' && typeof obj !== 'function')) return false;
+    var targets = [obj];
+    try {
+      var p = Object.getPrototypeOf(obj);
+      var guard = 0;
+      while (p && p !== Object.prototype && guard < 8) {
+        targets.push(p);
+        p = Object.getPrototypeOf(p);
+        guard++;
+      }
+    } catch (e) { }
+    for (var i = 0; i < targets.length; i++) {
+      var t = targets[i];
+      var ok = true;
+      for (var j = 0; j < names.length; j++) {
+        if (!t || typeof t[names[j]] !== 'function') { ok = false; break; }
+      }
+      if (ok) return true;
+    }
+    return false;
+  }
+
   function looksLikeScreensaver(v) {
-    return !!(v && typeof v.onMessage === 'function' && typeof v.startScreensaver === 'function');
+    return hasAllMethods(unwrapExport(v), ['onMessage', 'startScreensaver']);
   }
 
   function looksLikeWindowManager(v) {
-    return !!(v && typeof v.newWindow === 'function' && typeof v.closeWindow === 'function');
+    return hasAllMethods(unwrapExport(v), ['newWindow', 'closeWindow']);
   }
 
   function resolveByScan(req, needle, validator, log, label) {
@@ -694,6 +733,8 @@
       if (!m || typeof m !== 'object') { log.warn(label + '：模块表不可用，无法扫描'); return null; }
       var ids = Object.keys(m);
       var matched = 0;
+      var lastFailedId = null;
+      var lastFailedKeys = '(n/a)';
       for (var i = 0; i < ids.length; i++) {
         var id = ids[i];
         var src = getFactorySource(req, id);
@@ -702,13 +743,26 @@
         if (matched <= 3) log.info(label + '：候选模块 ' + id + '（含特征 ' + needle + '）');
         var cand = null;
         try { cand = req(Number(id)); } catch (e) { continue; }
+        if (!validator(cand)) {
+          lastFailedId = id;
+          try {
+            var u = unwrapExport(cand);
+            if (u && typeof u === 'object') { lastFailedKeys = Object.keys(u).slice(0, 12).join(',') || '(空对象)'; }
+            else { lastFailedKeys = 'typeof=' + (typeof u); }
+          } catch (e) { lastFailedKeys = '(读取键失败)'; }
+          continue;
+        }
         if (validator(cand)) {
           log.info(label + '：按特征命中模块 ' + id);
-          return cand;
+          return unwrapExport(cand) || cand;
         }
       }
       if (matched === 0) log.warn(label + '：模块表共 ' + Object.keys(m).length + ' 项，但没有工厂包含特征 "' + needle + '"');
       else log.warn(label + '：有 ' + matched + ' 个候选，但都不满足形状要求');
+
+        if (lastFailedId !== null) {
+          log.warn(label + '：候选 ' + lastFailedId + ' 的导出键 = ' + lastFailedKeys);
+        }
     } catch (e) { log.warn(label + '扫描异常: ' + (e && e.message || e)); }
     return null;
   }
@@ -716,14 +770,14 @@
   function resolveController(req, log) {
     var c = null;
     try { c = req(120); } catch (e) { }
-    if (looksLikeScreensaver(c)) return c;
+    if (looksLikeScreensaver(c)) return unwrapExport(c) || c;
     return resolveByScan(req, 'screensaverTransitionList', looksLikeScreensaver, log, '屏保控制器');
   }
 
   function resolveWindowManager(req, log) {
     var w = null;
     try { w = req(69); } catch (e) { }
-    if (looksLikeWindowManager(w)) return w;
+    if (looksLikeWindowManager(w)) return unwrapExport(w) || w;
     return resolveByScan(req, 'resetWindow', looksLikeWindowManager, log, '窗口管理器');
   }
   /* ------------------------------------------------------------------ *
