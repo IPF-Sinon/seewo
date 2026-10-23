@@ -46,6 +46,7 @@ $script:ResultPath  = Join-Path $script:ConfigDir 'command-result.json'
 $script:LogPath     = Join-Path $script:ConfigDir 'aura-screensaver.log'
 $script:Utf8NoBom   = New-Object System.Text.UTF8Encoding($false)
 $script:HostNames   = @('SeewoServiceAssistant')
+if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.2.0' }
 
 # ---------------------------------------------------------------------------
 # 管理员权限（写入 Program Files 必需）
@@ -180,6 +181,44 @@ function Start-Host {
 
 # ---------------------------------------------------------------------------
 # 注入状态检测
+# ---------------------------------------------------------------------------
+# 注入版本检测 / 升级
+#   注入块里会写一行「// 注入版本: x.y.z」。
+#   本程序自身版本 = $script:InjectionVersion（由 Build-Exe 内联或库文件提供）。
+#   两者不一致 -> 需要升级（进安全模式重装）。
+# ---------------------------------------------------------------------------
+
+function Get-InjectedVersion {
+    param([string]$MainText)
+    if (-not $MainText) { return $null }
+    $m = [regex]::Match($MainText, '//\s*注入版本:\s*([0-9]+\.[0-9]+\.[0-9]+)')
+    if ($m.Success) { return $m.Groups[1].Value }
+    return $null
+}
+
+# 返回 'none' | 'current' | 'outdated' | 'unknown'
+function Get-InjectionVersionState {
+    param($State)
+
+    if (-not $State -or -not $State.Injected) { return 'none' }
+
+    # 已经是注入状态，读一下版本号
+    try {
+        $info = Read-AsarHeader $State.Asar
+        $leaves = Get-AsarLeaves $info.Header
+        $mainLeaf = $null
+        foreach ($l in $leaves) { if ($l.Rel -eq 'main.js') { $mainLeaf = $l } }
+        if ($null -eq $mainLeaf) { return 'unknown' }
+        $txt = [System.Text.Encoding]::UTF8.GetString((Get-EntryBytes $info $mainLeaf))
+        $installed = Get-InjectedVersion -MainText $txt
+        if (-not $installed) { return 'outdated' }   # 老版本注入块没有版本行
+        if ($installed -eq $script:InjectionVersion) { return 'current' }
+        return 'outdated'
+    } catch {
+        return 'unknown'
+    }
+}
+
 # ---------------------------------------------------------------------------
 
 function Get-InjectionState {
@@ -644,7 +683,27 @@ function Refresh-UiState {
             $script:FormLoaded = $true
         }
 
-        $msg = '已注入 ✓  屏保行为由本工具控制'
+        # 版本检测：注入的不是当前版本 -> 提示升级
+        $vstate = Get-InjectionVersionState -State $st
+        if ($vstate -eq 'outdated') {
+            $group.Visible = $true
+            $btnSavePreview.Visible = $false
+            if ($script:PanelBottom) { $script:PanelBottom.Visible = $false }
+            $btnInstall.Visible = $true
+            $btnInstall.Text = '升级到最新版（一键）'
+            $btnImageSwap.Visible = $false
+            $btnUninstall.Visible = $true
+            $linkLog.Visible = $true
+            $msg = '检测到已注入的是旧版本 ⚠'
+            if ($st.Dir) { $msg += $script:NL + '安装目录：' + $st.Dir }
+            $msg += $script:NL + '点「升级到最新版」自动重装（必要时走安全模式）。'
+            Set-Status $msg
+            return
+        }
+
+        $btnInstall.Text = '一键安装'
+        $msg = '已注入 ✓  屏保行为由本工具控制（v' + $script:InjectionVersion + '）'
+        if ($vstate -eq 'unknown') { $msg = '已注入 ✓  版本未知（可能被手工改过）' }
         if ($st.Dir) { $msg += $script:NL + '安装目录：' + $st.Dir }
         $msg += $script:NL + '希沃管家：' + $procText
         Set-Status $msg
@@ -1541,10 +1600,28 @@ $btnInstall.add_Click({
 
         $mainText = [System.Text.Encoding]::UTF8.GetString((Get-EntryBytes $info $mainLeaf))
         if ($mainText.Contains($script:MarkBegin)) {
-            Add-Log 'app.asar 已经是注入状态'
-            Refresh-UiState -Full
-            [System.Windows.Forms.MessageBox]::Show('该 app.asar 已经是注入状态，无需重复安装。', '已注入', 'OK', 'Information') | Out-Null
-            return
+            $installedVer = Get-InjectedVersion -MainText $mainText
+            if ($installedVer -eq $script:InjectionVersion) {
+                Add-Log ('app.asar 已是最新版本 v' + $installedVer)
+                Refresh-UiState -Full
+                [System.Windows.Forms.MessageBox]::Show('该 app.asar 已是最新版本，无需重装。', '已是最新', 'OK', 'Information') | Out-Null
+                return
+            }
+            Add-Log ('检测到旧版本注入（已装=' + $installedVer + '，当前=' + $script:InjectionVersion + '），开始升级')
+            $bkA = $asar + '.bak'
+            if (-not (Test-Path -LiteralPath $bkA)) { throw ('升级需要备份，但找不到：' + $bkA) }
+            try {
+                Remove-Item -LiteralPath $asar -Force -ErrorAction Stop
+                Copy-Item -LiteralPath $bkA -Destination $asar -Force -ErrorAction Stop
+                Add-Log '已回滚官方 app.asar，准备重新注入'
+            } catch {
+                throw ('升级需先回滚，但写入被拒：' + $_.Exception.Message + $script:NL + '可改用安全模式升级。')
+            }
+            $info = Read-AsarHeader $asar
+            $leaves = Get-AsarLeaves $info.Header
+            $mainLeaf = $null
+            foreach ($l in $leaves) { if ($l.Rel -eq 'main.js') { $mainLeaf = $l } }
+            $mainText = [System.Text.Encoding]::UTF8.GetString((Get-EntryBytes $info $mainLeaf))
         }
 
         $res = Get-PatchedMainJs -Source $mainText -LoaderText $script:LoaderText -ConfigJson $script:DefaultConfigJson

@@ -15,6 +15,7 @@
       每个条目的 offset 是相对 dataOffset 的字符串，size 是数字
 #>
 
+$script:InjectionVersion = '1.2.0'
 $script:MarkBegin = '/* ===== aura-screensaver injection BEGIN ===== */'
 $script:MarkEnd   = '/* ===== aura-screensaver injection END ===== */'
 
@@ -135,6 +136,7 @@ function Get-PatchedMainJs {
     [void]$sb.Append($NL + $script:MarkBegin + $NL)
     [void]$sb.Append('// 由 tools/ps/Patch-Asar.ps1 自动生成 —— 请勿手工编辑（重跑补丁器即可更新）' + $NL)
     [void]$sb.Append('// 注入时间: ' + (Get-Date).ToString('o') + $NL)
+    [void]$sb.Append('// 注入版本: ' + $script:InjectionVersion + $NL)
     [void]$sb.Append('// 能力: (a) 关闭屏保  (b) 自定义图集/停留时长/适配模式/图文  (c) 切断 close->startLock 级联  (d) 手动预览' + $NL)
     [void]$sb.Append('try {' + $NL)
     [void]$sb.Append('  globalThis.__AURA_INLINE_CONFIG__ = ' + $ConfigJson + ';' + $NL)
