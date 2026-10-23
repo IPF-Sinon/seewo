@@ -269,7 +269,7 @@ $form.MinimumSize = New-Object System.Drawing.Size(460, 380)
 
 # ---- 顶部：状态区（自适应高度，长路径自动换行）----
 $panelTop = New-Object System.Windows.Forms.Panel
-$panelTop.Dock = 'Top'
+$panelTop.Dock = 'Fill'
 # ★ 不用 AutoSize：WinForms 里 AutoSize + Dock 组合算不准高度，
 #   会把下面两个开关盖住。改为按文字实际首选高度精确计算。
 $panelTop.Height = 96
@@ -297,7 +297,7 @@ function Update-StatusHeight {
 
 # ---- 底部：按钮栏（固定，永远可见）----
 $panelBottom = New-Object System.Windows.Forms.Panel
-$panelBottom.Dock = 'Bottom'
+$panelBottom.Dock = 'Fill'
 $panelBottom.Height = 64
 
 $flowBottom = New-Object System.Windows.Forms.FlowLayoutPanel
@@ -452,9 +452,20 @@ $txtTrans.Margin = New-Object System.Windows.Forms.Padding(3, 4, 3, 4)
 $table.Controls.Add($txtTrans)
 
 # 顶部 / 底部 / 填充 的添加顺序（Fill 最后加，避免盖住其它面板）
-$form.Controls.Add($panelTop)
-$form.Controls.Add($panelBottom)
-$form.Controls.Add($panelMain)
+# ---- 根布局：三行表格（顶部自适应 / 中间填充 / 底部固定）----
+#   ★ 用 TableLayoutPanel 而不是 Dock 叠加：行高按行样式确定，
+#     不会出现「某个面板高度算不准、盖住下面」的问题。
+$root = New-Object System.Windows.Forms.TableLayoutPanel
+$root.Dock = 'Fill'
+$root.ColumnCount = 1
+$root.RowCount = 3
+[void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+[void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+[void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 66)))
+$form.Controls.Add($root)
+$root.Controls.Add($panelTop, 0, 0)
+$root.Controls.Add($panelMain, 0, 1)
+$root.Controls.Add($panelBottom, 0, 2)
 
 # 让状态区在窗口变窄时仍能完整换行显示
 $form.add_Resize({
