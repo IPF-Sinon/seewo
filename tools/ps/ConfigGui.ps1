@@ -994,7 +994,7 @@ function Invoke-SafeModeAutoAction {
                     Remove-Item -LiteralPath $asar -Recurse -Force -ErrorAction Stop
                 }
                 if (Test-Path -LiteralPath $asar) {
-                    [System.IO.File]::Replace($asar + '.new', $asar, $null)
+                    if (-not (Set-FileContentFrom -Source ($asar + '.new') -Target $asar)) { throw '替换 app.asar 失败（三种方式都不可用）' }
                 } else {
                     Move-Item -LiteralPath ($asar + '.new') -Destination $asar -Force
                 }
@@ -1019,6 +1019,50 @@ function Invoke-SafeModeAutoAction {
         & shutdown.exe /r /t 15 /c "AuraScreensaver: 操作失败，已恢复正常启动" 2>&1 | Out-Null
         return $false
     }
+}
+
+# ---------------------------------------------------------------------------
+# 把 $Source 替换到 $Target（多级兜底）
+#   ★ 坑：File.Replace(src, dst, $null) 里第 3 个参数不能传 $null ——
+#     PowerShell 会绑成空字符串 ""，.NET 直接报「路径的形式不合法」。
+#     必须传一个真实的备份路径。这里逐级兜底，并把用了哪种方式写进日志。
+# ---------------------------------------------------------------------------
+
+function Set-FileContentFrom {
+    param([string]$Source, [string]$Target)
+
+    # 1) 原子替换（带真实备份路径）
+    $rb = $Target + '.replbak'
+    try {
+        [System.IO.File]::Replace($Source, $Target, $rb)
+        Remove-Item -LiteralPath $rb -Force -ErrorAction SilentlyContinue
+        Add-Log '替换方式：File.Replace（原子）'
+        return $true
+    } catch {
+        Add-Log ('File.Replace 失败: ' + $_.Exception.Message)
+        Remove-Item -LiteralPath $rb -Force -ErrorAction SilentlyContinue
+    }
+
+    # 2) 直接覆盖写（安全模式/文件未被占用时可用）
+    try {
+        Copy-Item -LiteralPath $Source -Destination $Target -Force -ErrorAction Stop
+        Add-Log '替换方式：直接覆盖'
+        return $true
+    } catch {
+        Add-Log ('直接覆盖失败: ' + $_.Exception.Message)
+    }
+
+    # 3) 删除后移入
+    try {
+        Remove-Item -LiteralPath $Target -Force -ErrorAction Stop
+        Move-Item -LiteralPath $Source -Destination $Target -Force -ErrorAction Stop
+        Add-Log '替换方式：删除后移入'
+        return $true
+    } catch {
+        Add-Log ('删除后移入失败: ' + $_.Exception.Message)
+    }
+
+    return $false
 }
 
 # ---------------------------------------------------------------------------
@@ -1136,7 +1180,7 @@ function Invoke-SafeModeAutoInstall {
             }
             Copy-Item -LiteralPath $staged -Destination ($asar + '.new') -Force
             try {
-                if (Test-Path -LiteralPath $asar) { [System.IO.File]::Replace($asar + '.new', $asar, $null) }
+                if (Test-Path -LiteralPath $asar) { if (-not (Set-FileContentFrom -Source ($asar + '.new') -Target $asar)) { throw '替换 app.asar 失败（三种方式都不可用）' } }
                 else { Move-Item -LiteralPath ($asar + '.new') -Destination $asar -Force }
                 Add-Log '已替换 app.asar'
             } finally {
@@ -1597,7 +1641,7 @@ $btnInstall.add_Click({
 
         try {
             if (Test-Path -LiteralPath $asar) {
-                [System.IO.File]::Replace($tmpNew, $asar, $null)
+                if (-not (Set-FileContentFrom -Source $tmpNew -Target $asar)) { throw '替换 app.asar 失败（三种方式都不可用）' }
                 Add-Log '原子替换成功 (File.Replace)'
             } else {
                 Move-Item -LiteralPath $tmpNew -Destination $asar -Force -ErrorAction Stop
