@@ -270,9 +270,10 @@ $form.MinimumSize = New-Object System.Drawing.Size(460, 380)
 # ---- 顶部：状态区（自适应高度，长路径自动换行）----
 $panelTop = New-Object System.Windows.Forms.Panel
 $panelTop.Dock = 'Top'
-$panelTop.AutoSize = $true
-$panelTop.AutoSizeMode = 'GrowAndShrink'
-$panelTop.Padding = New-Object System.Windows.Forms.Padding(10, 8, 10, 8)
+# ★ 不用 AutoSize：WinForms 里 AutoSize + Dock 组合算不准高度，
+#   会把下面两个开关盖住。改为按文字实际首选高度精确计算。
+$panelTop.Height = 96
+$panelTop.Padding = New-Object System.Windows.Forms.Padding(10, 8, 10, 6)
 
 $lblStatus = New-Object System.Windows.Forms.Label
 $lblStatus.AutoSize = $true
@@ -281,6 +282,18 @@ $lblStatus.MaximumSize = New-Object System.Drawing.Size(620, 0)
 $lblStatus.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 10)
 $lblStatus.Text = ''
 $panelTop.Controls.Add($lblStatus)
+
+function Update-StatusHeight {
+    try {
+        $w = $form.ClientSize.Width - 44
+        if ($w -lt 240) { $w = 240 }
+        $lblStatus.MaximumSize = New-Object System.Drawing.Size($w, 0)
+        $pref = $lblStatus.GetPreferredSize((New-Object System.Drawing.Size($w, 0)))
+        $h = $pref.Height + 20
+        if ($h -lt 48) { $h = 48 }
+        if ($panelTop.Height -ne $h) { $panelTop.Height = $h }
+    } catch { }
+}
 
 # ---- 底部：按钮栏（固定，永远可见）----
 $panelBottom = New-Object System.Windows.Forms.Panel
@@ -445,15 +458,12 @@ $form.Controls.Add($panelMain)
 
 # 让状态区在窗口变窄时仍能完整换行显示
 $form.add_Resize({
-    try {
-        $w = $form.ClientSize.Width - 40
-        if ($w -lt 260) { $w = 260 }
-        $lblStatus.MaximumSize = New-Object System.Drawing.Size($w, 0)
-    } catch { }
+    try { Update-StatusHeight } catch { }
 })
 function Set-Status {
     param([string]$Text)
     $lblStatus.Text = $Text
+    Update-StatusHeight
     [System.Windows.Forms.Application]::DoEvents()
 }
 
