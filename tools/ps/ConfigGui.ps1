@@ -628,14 +628,53 @@ $rbCover.Margin = New-Object System.Windows.Forms.Padding(3, 4, 3, 4)
 $flowFit.Controls.Add($rbCover)
 
 $table.Controls.Add((New-AuraRowLabel '图片列表'))
+$imgPanel = New-Object System.Windows.Forms.Panel
+$imgPanel.Anchor = 'Left,Right'
+$imgPanel.Height = 168
+$imgPanel.Margin = New-Object System.Windows.Forms.Padding(3, 4, 3, 4)
+
+$imgBar = New-Object System.Windows.Forms.FlowLayoutPanel
+$imgBar.Dock = 'Top'
+$imgBar.Height = 34
+$imgBar.WrapContents = $false
+
+$btnPickFolder = New-Object System.Windows.Forms.Button
+$btnPickFolder.Text = '选择文件夹…'
+$btnPickFolder.AutoSize = $true
+$btnPickFolder.Margin = New-Object System.Windows.Forms.Padding(0, 2, 8, 2)
+$imgBar.Controls.Add($btnPickFolder)
+
+$btnPickFiles = New-Object System.Windows.Forms.Button
+$btnPickFiles.Text = '选择图片…'
+$btnPickFiles.AutoSize = $true
+$btnPickFiles.Margin = New-Object System.Windows.Forms.Padding(0, 2, 8, 2)
+$imgBar.Controls.Add($btnPickFiles)
+
+$btnPreviewImgs = New-Object System.Windows.Forms.Button
+$btnPreviewImgs.Text = '预览图片'
+$btnPreviewImgs.AutoSize = $true
+$btnPreviewImgs.Margin = New-Object System.Windows.Forms.Padding(0, 2, 8, 2)
+$imgBar.Controls.Add($btnPreviewImgs)
+
+$lblImgCount = New-Object System.Windows.Forms.Label
+$lblImgCount.AutoSize = $true
+$lblImgCount.ForeColor = [System.Drawing.Color]::DimGray
+$lblImgCount.Margin = New-Object System.Windows.Forms.Padding(4, 8, 0, 0)
+$imgBar.Controls.Add($lblImgCount)
+$imgPanel.Controls.Add($imgBar)
+
 $txtImages = New-Object System.Windows.Forms.TextBox
 $txtImages.Multiline = $true
 $txtImages.ScrollBars = 'Vertical'
 $txtImages.AcceptsReturn = $true
-$txtImages.Height = 96
-$txtImages.Anchor = 'Left,Right'
-$txtImages.Margin = New-Object System.Windows.Forms.Padding(3, 4, 3, 4)
-$table.Controls.Add($txtImages)
+$txtImages.Dock = 'Fill'
+$txtImages.Font = New-Object System.Drawing.Font('Consolas', 8)
+$imgPanel.Controls.Add($txtImages)
+
+# 顺序：先加 Fill 再加 Top，否则 Top 会被遮住
+$imgPanel.Controls.SetChildIndex($txtImages, 1)
+$imgPanel.Controls.SetChildIndex($imgBar, 0)
+$table.Controls.Add($imgPanel)
 
 $table.Controls.Add((New-AuraRowLabel '图文条目'))
 $txtTexts = New-Object System.Windows.Forms.TextBox
@@ -648,11 +687,23 @@ $txtTexts.Margin = New-Object System.Windows.Forms.Padding(3, 4, 3, 4)
 $table.Controls.Add($txtTexts)
 
 $table.Controls.Add((New-AuraRowLabel '转场效果'))
+$transPanel = New-Object System.Windows.Forms.FlowLayoutPanel
+$transPanel.AutoSize = $true
+$transPanel.WrapContents = $false
+$transPanel.Margin = New-Object System.Windows.Forms.Padding(0)
+
 $txtTrans = New-Object System.Windows.Forms.TextBox
 $txtTrans.Width = 130
-$txtTrans.Anchor = 'Left'
-$txtTrans.Margin = New-Object System.Windows.Forms.Padding(3, 4, 3, 4)
-$table.Controls.Add($txtTrans)
+$txtTrans.Margin = New-Object System.Windows.Forms.Padding(3, 4, 10, 4)
+$transPanel.Controls.Add($txtTrans)
+
+$lblTransHint = New-Object System.Windows.Forms.Label
+$lblTransHint.AutoSize = $true
+$lblTransHint.ForeColor = [System.Drawing.Color]::DimGray
+$lblTransHint.Margin = New-Object System.Windows.Forms.Padding(0, 8, 0, 0)
+$lblTransHint.Text = '每张图的切换动画编号 0-6。留空 = 每次随机。例: 0,3,6'
+$transPanel.Controls.Add($lblTransHint)
+$table.Controls.Add($transPanel)
 
 # 顶部 / 底部 / 填充 的添加顺序（Fill 最后加，避免盖住其它面板）
 # ---- 根布局：三行表格（顶部自适应 / 中间填充 / 底部固定）----
@@ -674,6 +725,123 @@ $root.Controls.Add($panelBottom, 0, 2)
 $form.add_Resize({
     try { Update-StatusHeight } catch { }
 })
+# ---------------------------------------------------------------------------
+# 图片选择与预览
+#   用 Windows 标准对话框（FolderBrowserDialog / OpenFileDialog）取路径，
+#   不要把路径手打 —— 手打容易出错，且中文/空格路径难处理。
+# ---------------------------------------------------------------------------
+
+function Get-ImageFilesInFolder {
+    param([string]$Folder)
+    if (-not (Test-Path -LiteralPath $Folder)) { return @() }
+    return @(Get-ChildItem -LiteralPath $Folder -File -ErrorAction SilentlyContinue |
+        Where-Object { @('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp') -contains $_.Extension.ToLower() } |
+        Sort-Object Name)
+}
+
+# 把选中的图片填进图片列表，并刷新计数提示
+function Set-ImageListFromPaths {
+    param($Paths)
+    $cur = @()
+    if ($txtImages.Text.Trim() -ne '') {
+        $cur = @($txtImages.Text -split "\r?\n" | Where-Object { $_.Trim() -ne '' })
+    }
+    foreach ($p in @($Paths)) {
+        if ($p -and ($cur -notcontains $p)) { $cur += $p }
+    }
+    $txtImages.Text = ($cur -join $script:NL)
+    Update-ImageCountHint
+}
+
+function Update-ImageCountHint {
+    try {
+        $n = 0
+        if ($txtImages.Text.Trim() -ne '') {
+            $n = @($txtImages.Text -split "\r?\n" | Where-Object { $_.Trim() -ne '' }).Count
+        }
+        $missing = 0
+        if ($n -gt 0) {
+            foreach ($line in ($txtImages.Text -split "\r?\n")) {
+                $v = $line.Trim()
+                if ($v -eq '') { continue }
+                if (-not (Test-Path -LiteralPath $v)) { $missing++ }
+            }
+        }
+        $txt2 = ('共 ' + $n + ' 张')
+        if ($missing -gt 0) { $txt2 += ('，其中 ' + $missing + ' 张路径不存在') }
+        $lblImgCount.Text = $txt2
+        if ($missing -gt 0) { $lblImgCount.ForeColor = [System.Drawing.Color]::Firebrick }
+        else { $lblImgCount.ForeColor = [System.Drawing.Color]::DimGray }
+    } catch { }
+}
+
+# 图片预览窗（列表 + 缩略图）
+function Show-ImagePreviewDialog {
+    $paths = @()
+    if ($txtImages.Text.Trim() -ne '') {
+        $paths = @($txtImages.Text -split "\r?\n" | Where-Object { $_.Trim() -ne '' } | ForEach-Object { $_.Trim() })
+    }
+    if ($paths.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show('图片列表为空，先选几张图片吧。', '没有图片', 'OK', 'Information') | Out-Null
+        return
+    }
+
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = '图片预览（' + $paths.Count + ' 张）'
+    $dlg.Size = New-Object System.Drawing.Size(820, 560)
+    $dlg.StartPosition = 'CenterParent'
+
+    $list = New-Object System.Windows.Forms.ListBox
+    $list.Dock = 'Left'
+    $list.Width = 320
+    $list.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 8)
+
+    $pic = New-Object System.Windows.Forms.PictureBox
+    $pic.Dock = 'Fill'
+    $pic.SizeMode = 'Zoom'
+    $pic.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
+
+    $info = New-Object System.Windows.Forms.Label
+    $info.Dock = 'Bottom'
+    $info.Height = 40
+
+    foreach ($p in $paths) {
+        $mark = $(if (Test-Path -LiteralPath $p) { '' } else { '  [不存在]' })
+        [void]$list.Items.Add((Split-Path -Leaf $p) + $mark)
+    }
+
+    $list.add_SelectedIndexChanged({
+        try {
+            $i = $list.SelectedIndex
+            if ($i -lt 0 -or $i -ge $paths.Count) { return }
+            $p = $paths[$i]
+            if (Test-Path -LiteralPath $p) {
+                $fs = [System.IO.File]::OpenRead($p)
+                $img = [System.Drawing.Image]::FromStream($fs)
+                $pic.Image = $img
+                $fs.Close()
+                $info.Text = $p
+            } else {
+                $pic.Image = $null
+                $info.Text = '文件不存在：' + $p
+            }
+        } catch {
+            $pic.Image = $null
+            $info.Text = '无法加载：' + $_.Exception.Message
+        }
+    })
+
+    $right = New-Object System.Windows.Forms.Panel
+    $right.Dock = 'Fill'
+    $right.Controls.Add($pic)
+    $right.Controls.Add($info)
+
+    $dlg.Controls.Add($right)
+    $dlg.Controls.Add($list)
+    if ($paths.Count -gt 0) { $list.SelectedIndex = 0 }
+    [void]$dlg.ShowDialog($form)
+}
+
 function Set-Status {
     param([string]$Text)
     $lblStatus.Text = $Text
@@ -1429,7 +1597,13 @@ function Show-ImageSwapDialog {
     $btnOpen.Margin = New-Object System.Windows.Forms.Padding(3, 3, 3, 6)
     $flow.Controls.Add($btnOpen)
 
-    $btnApply = New-Object System.Windows.Forms.Button
+    $btnApplyFolder = New-Object System.Windows.Forms.Button
+$btnApplyFolder.Text = '选择文件夹并替换（自动取全部图片）'
+$btnApplyFolder.AutoSize = $true
+$btnApplyFolder.Margin = New-Object System.Windows.Forms.Padding(3, 3, 3, 6)
+$flow.Controls.Add($btnApplyFolder)
+
+$btnApply = New-Object System.Windows.Forms.Button
     $btnApply.Text = '选择我的图片并替换（自动备份）'
     $btnApply.AutoSize = $true
     $btnApply.Margin = New-Object System.Windows.Forms.Padding(3, 3, 3, 6)
@@ -1465,7 +1639,26 @@ function Show-ImageSwapDialog {
         } catch { $lblResult.Text = '打开失败：' + $_.Exception.Message }
     })
 
-    $btnApply.add_Click({
+    $btnApplyFolder.add_Click({
+    try {
+        $fb = New-Object System.Windows.Forms.FolderBrowserDialog
+        $fb.Description = '选择放有你自己图片的文件夹'
+        if ($fb.ShowDialog() -ne 'OK') { return }
+        $r = Apply-ScreenSaverImages -Dir $targetDir -SourceDir $fb.SelectedPath
+        $lblResult.Text = '完成：' + $r.Replaced + ' 个文件已替换（循环使用 ' + $r.Source + ' 张图）。' + $script:NL +
+            '备份在：' + $r.Backup + $script:NL +
+            '重启希沃管家（或重启电脑）即可看到新屏保。'
+        [System.Windows.Forms.MessageBox]::Show(
+            ('替换完成。' + $script:NL + $script:NL + '重启希沃管家后生效。' + $script:NL + $script:NL +
+             '备份位置：' + $r.Backup),
+            '完成', 'OK', 'Information') | Out-Null
+    } catch {
+        $lblResult.Text = '替换失败：' + $_.Exception.Message
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, '替换失败', 'OK', 'Warning') | Out-Null
+    }
+})
+
+$btnApply.add_Click({
         try {
             $fb = New-Object System.Windows.Forms.FolderBrowserDialog
             $fb.Description = '选择放有你自己图片（jpg/png）的文件夹'
@@ -1856,6 +2049,37 @@ $btnInstall.add_Click({
 # ---------------------------------------------------------------------------
 
 $btnImageSwap.add_Click({ Show-ImageSwapDialog })
+
+$btnPickFolder.add_Click({
+    try {
+        $fb = New-Object System.Windows.Forms.FolderBrowserDialog
+        $fb.Description = '选择放有屏保图片的文件夹（自动取里面所有图片）'
+        if ($fb.ShowDialog() -ne 'OK') { return }
+        $files = Get-ImageFilesInFolder -Folder $fb.SelectedPath
+        if ($files.Count -eq 0) {
+            [System.Windows.Forms.MessageBox]::Show('这个文件夹里没有图片（支持 jpg/png/bmp/gif/webp）。', '没找到图片', 'OK', 'Warning') | Out-Null
+            return
+        }
+        Set-ImageListFromPaths -Paths ($files | ForEach-Object { $_.FullName })
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, '选择失败', 'OK', 'Warning') | Out-Null
+    }
+})
+
+$btnPickFiles.add_Click({
+    try {
+        $of = New-Object System.Windows.Forms.OpenFileDialog
+        $of.Multiselect = $true
+        $of.Filter = '图片文件|*.jpg;*.jpeg;*.png;*.bmp;*.gif;*.webp|所有文件|*.*'
+        if ($of.ShowDialog() -ne 'OK') { return }
+        Set-ImageListFromPaths -Paths $of.FileNames
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, '选择失败', 'OK', 'Warning') | Out-Null
+    }
+})
+
+$txtImages.add_TextChanged({ Update-ImageCountHint })
+$btnPreviewImgs.add_Click({ Show-ImagePreviewDialog })
 $linkDiag.add_Click({ Show-DiagnosticDialog })
 
 $btnSavePreview.add_Click({

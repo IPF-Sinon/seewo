@@ -297,11 +297,19 @@
           // ★ 注意：必须把**改写后的 msg** 传下去，不能再用 arguments
           //   （arguments 里仍是原始消息，改写会被静默丢弃）。
           var forwarded = msg;
+          // ★ 无论有没有自定义图集，都记下集控最后下发的**原始**载荷。
+          //   否则 override 为空时预览会说「尚未收到集控下发」，
+          //   可实际上屏幕上正在放集控屏保 —— 逻辑死结。
+          try {
+            if (msg && msg.data && typeof msg.data === 'object') {
+              controller.__auraLastPayload = msg.data;
+              log.info('已记录集控下发载荷（图片 ' + (((msg.data.imageList) || []).length) + ' 张）');
+            }
+          } catch (e) { }
           if (cfg.override) {
             try {
               var data = applyOverride(msg.data, cfg.override, log);
               forwarded = merge(msg, { data: data });
-              // 记录最后一次下发的载荷，供 startScreensaver 对齐转场数组长度使用
               controller.__auraLastPayload = data;
               state.overridden++;
               log.info('已应用自定义图集（图片 ' + ((data && data.imageList && data.imageList.length) || 0) + ' 张）');
