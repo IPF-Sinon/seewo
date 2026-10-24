@@ -46,7 +46,7 @@ $script:ResultPath  = Join-Path $script:ConfigDir 'command-result.json'
 $script:LogPath     = Join-Path $script:ConfigDir 'aura-screensaver.log'
 $script:Utf8NoBom   = New-Object System.Text.UTF8Encoding($false)
 $script:HostNames   = @('SeewoServiceAssistant')
-if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.2.0' }
+if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.3.0' }
 
 # ---------------------------------------------------------------------------
 # 管理员权限（写入 Program Files 必需）
@@ -1145,9 +1145,31 @@ function Invoke-SafeModeAutoAction {
             if ($null -eq $mainLeaf) { throw 'asar 里没有 main.js' }
             $mainText = [System.Text.Encoding]::UTF8.GetString((Get-EntryBytes $info $mainLeaf))
 
+            # ★ 已注入时不能直接跳过：可能装的是旧版本，需要先回滚再注入（升级）
+            $needInject = $true
             if ($mainText.Contains($script:MarkBegin)) {
-                Add-Log '已经是注入状态，跳过注入'
-            } else {
+                $cur = Get-InjectedVersion -MainText $mainText
+                if ($cur -eq $script:InjectionVersion) {
+                    Add-Log ('已是当前版本 v' + $cur + '，跳过注入')
+                    $needInject = $false
+                } else {
+                    Add-Log ('检测到旧版本（已装=' + $cur + '，当前=' + $script:InjectionVersion + '），回滚后重新注入')
+                    if (-not (Test-Path -LiteralPath $bak)) { throw ('升级需要备份，但找不到：' + $bak) }
+                    if (Test-Path -LiteralPath $asar -PathType Container) {
+                        Remove-Item -LiteralPath $asar -Recurse -Force -ErrorAction Stop
+                    }
+                    Copy-Item -LiteralPath $bak -Destination $asar -Force -ErrorAction Stop
+                    Add-Log '已回滚官方 app.asar，准备注入新版本'
+                    $info = Read-AsarHeader $asar
+                    $leaves = Get-AsarLeaves $info.Header
+                    $mainLeaf = $null
+                    foreach ($l in $leaves) { if ($l.Rel -eq 'main.js') { $mainLeaf = $l } }
+                    if ($null -eq $mainLeaf) { throw '回滚后 asar 里没有 main.js' }
+                    $mainText = [System.Text.Encoding]::UTF8.GetString((Get-EntryBytes $info $mainLeaf))
+                }
+            }
+
+            if ($needInject) {
                 $res = Get-PatchedMainJs -Source $mainText -LoaderText $script:LoaderText -ConfigJson $script:DefaultConfigJson
                 $mainBytes = [System.Text.Encoding]::UTF8.GetBytes($res.Text)
                 $stage = Join-Path ([System.IO.Path]::GetTempPath()) ('aura-safe-' + [System.Guid]::NewGuid().ToString('N'))
