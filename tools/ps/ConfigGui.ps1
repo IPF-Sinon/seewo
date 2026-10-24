@@ -1084,6 +1084,58 @@ function Install-DirectoryMode {
 # ---------------------------------------------------------------------------
 # 安全模式动作（安装 / 卸载共用）
 # ---------------------------------------------------------------------------
+# 询问是否重启到安全模式执行操作（安装 / 升级 / 卸载共用）
+#   安全模式是唯一能写入 app.asar 的路径（正常模式被希沃内核驱动拦）。
+# ---------------------------------------------------------------------------
+
+function Show-SafeModePrompt {
+    param([ValidateSet('install', 'uninstall')][string]$Action = 'install')
+
+    $isUn = ($Action -eq 'uninstall')
+    $title = '需要安全模式才能继续'
+    $what = $(if ($isUn) { '卸载（还原官方 app.asar）' } else { '安装/升级' })
+
+    $ans = [System.Windows.Forms.MessageBox]::Show(
+        ('正常模式下无法写入 app.asar。' + $script:NL + $script:NL +
+         '原因：希沃的内核驱动（SeewoZoroWall / SeewoKeLiteLady）会拦截写入，' + $script:NL +
+         '目录 ACL 里管理员已是完全控制，但连 takeown 都被拒绝。' + $script:NL + $script:NL +
+         '安全模式不加载这些驱动，是唯一可行的路径。' + $script:NL + $script:NL +
+         '点「是」：立即重启到安全模式，自动完成' + $what + '，然后自动重启回正常。' + $script:NL +
+         '点「否」：取消（也可以之后手动再点一次）。'),
+        $title, 'YesNo', 'Question')
+
+    if ($ans -ne 'Yes') { Add-Log '用户取消安全模式流程'; return }
+
+    if (Test-IsSafeMode) {
+        # 已经在安全模式里了：直接执行，不用再重启
+        Add-Log ('当前已在安全模式，直接执行 ' + $Action)
+        [void](Invoke-SafeModeAutoAction -Action $Action)
+        return
+    }
+
+    try {
+        Set-Status '正在准备重启到安全模式…'
+        $recovery = Invoke-EnterSafeModeAction -Action $Action
+        Add-Log ('已安排安全模式 ' + $Action + '，准备重启')
+        [System.Windows.Forms.MessageBox]::Show(
+            ('已设置好，即将自动重启进入安全模式。' + $script:NL + $script:NL +
+             '接下来全自动，不需要你操作：' + $script:NL +
+             '  1) 电脑重启进入安全模式' + $script:NL +
+             '  2) 登录后程序自动运行并完成' + $what + $script:NL +
+             '  3) 自动关闭安全模式并重启回正常' + $script:NL + $script:NL +
+             '急救：万一卡在安全模式，双击桌面「退出安全模式.bat」即可恢复。'),
+            '即将重启', 'OK', 'Information') | Out-Null
+    } catch {
+        Add-Log ('安排安全模式失败: ' + $_.Exception.Message)
+        [System.Windows.Forms.MessageBox]::Show(
+            ('无法设置安全模式：' + $_.Exception.Message + $script:NL + $script:NL +
+             '可手动操作：Win+R 输入 msconfig → 引导 → 勾选「安全引导」「最小」→ 重启，' + $script:NL +
+             '然后在安全模式里再次运行本程序。'),
+            '设置失败', 'OK', 'Error') | Out-Null
+    }
+}
+
+# ---------------------------------------------------------------------------
 
 function Invoke-EnterSafeModeAction {
     param([ValidateSet('install', 'uninstall')][string]$Action = 'install')
@@ -1604,13 +1656,26 @@ $btnInstall.add_Click({
             Add-Log ('检测到旧版本注入（已装=' + $installedVer + '，当前=' + $script:InjectionVersion + '），开始升级')
             $bkA = $asar + '.bak'
             if (-not (Test-Path -LiteralPath $bkA)) { throw ('升级需要备份，但找不到：' + $bkA) }
+            $rolled = $false
             try {
                 Remove-Item -LiteralPath $asar -Force -ErrorAction Stop
                 Copy-Item -LiteralPath $bkA -Destination $asar -Force -ErrorAction Stop
+                $rolled = $true
                 Add-Log '已回滚官方 app.asar，准备重新注入'
             } catch {
-                throw ('升级需先回滚，但写入被拒：' + $_.Exception.Message + $script:NL + '可改用安全模式升级。')
+                # ★ 正常模式下回滚同样被驱动拦 —— 升级必须走安全模式，而不是报错退出
+                Add-Log ('正常模式回滚失败（预期）：' + $_.Exception.Message)
             }
+
+            if (-not $rolled) {
+                if (-not (Test-IsSafeMode)) {
+                    Add-Log '升级转入安全模式'
+                    Show-SafeModePrompt
+                    return
+                }
+                throw ('安全模式下回滚仍失败：' + $script:NL + $script:InstallLog)
+            }
+
             $info = Read-AsarHeader $asar
             $leaves = Get-AsarLeaves $info.Header
             $mainLeaf = $null
