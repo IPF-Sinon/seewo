@@ -28,7 +28,14 @@ jobs:
       - name: Build single-file exe (no Node.js required)
         shell: pwsh
         run: |
-          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+          # runner 上 PSGallery 可能未注册；失败也不中断 ——
+          # Build-Exe.ps1 内部会在缺少 ps2exe 时自行安装
+          try {
+            if (-not (Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue)) {
+              Register-PSRepository -Default -ErrorAction SilentlyContinue
+            }
+            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+          } catch { }
           ./tools/ps/Build-Exe.ps1 -OutputDir dist
 
       - name: Show artifact
