@@ -550,6 +550,15 @@
       if (!controller || typeof controller.onMessage !== 'function') {
         return { ok: false, reason: 'no-controller', message: '屏保控制器(120)未就绪，无法预览' };
       }
+      // ★ 预览前先重读磁盘配置：GUI 保存后 loader 里的 cfg 还是 boot 时的旧值，
+      //   不重载就会出现「界面里明明填了图片，却说 override 为空」。
+      try {
+        var freshCfg = loadConfig(log);
+        var k;
+        for (k in cfg) { if (Object.prototype.hasOwnProperty.call(cfg, k)) { delete cfg[k]; } }
+        for (k in freshCfg) { if (Object.prototype.hasOwnProperty.call(freshCfg, k)) { cfg[k] = freshCfg[k]; } }
+        log.info('预览前已重载配置: override=' + (cfg.override ? '有' : '空'));
+      } catch (e) { log.warn('预览前重载配置失败: ' + (e && e.message || e)); }
       var built = buildPreviewPayload(cfg, controller, log);
       if (built.error) return { ok: false, reason: built.reason, message: built.error };
 

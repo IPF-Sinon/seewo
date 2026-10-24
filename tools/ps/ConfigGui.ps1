@@ -174,6 +174,161 @@ function Get-RuntimeText {
 # ---------------------------------------------------------------------------
 # 首页诊断：未安装时也能看到各组件状态，方便对比「装之前 / 装之后」
 # ---------------------------------------------------------------------------
+# 清理：识别本软件产生的、已无用的文件
+#   - resources 下残留的探测/临时文件（.aura-probe-* / .aura-diag-* / app.asar.new）
+#   - %APPDATA%\seewo\AuraScreensaver 下的临时与历史文件
+#   - 桌面上的 app.asar.injected-* 导出文件
+#   - 遗留的 install.log / 诊断文件（可选保留最新一个）
+#   ★ 只删自己产生的东西；官方文件、.bak 备份一律不碰。
+# ---------------------------------------------------------------------------
+
+function Get-CleanupCandidates {
+    $items = New-Object System.Collections.ArrayList
+    $st = Get-InjectionState
+
+    # 1) 安装目录里的残留
+    if ($st.Dir) {
+        $res = Join-Path $st.Dir 'resources'
+        foreach ($pat in @('.aura-probe-*', '.aura-diag-*', 'app.asar.new', 'app.asar.replbak', 'aura-stage-*', 'aura-safe-*', 'aura-dir-*')) {
+            try {
+                $found = @(Get-ChildItem -LiteralPath $res -Filter $pat -Force -ErrorAction SilentlyContinue)
+                foreach ($f in $found) {
+                    [void]$items.Add([pscustomobject]@{ Path = $f.FullName; Kind = '文件'; Why = '安装时残留的探测/临时项' })
+                }
+            } catch { }
+        }
+    }
+
+    # 2) %APPDATA% 下的临时文件
+    if (Test-Path -LiteralPath $script:ConfigDir) {
+        foreach ($pat in @('*.tmp', 'config.json.tmp', '*.probe')) {
+            try {
+                foreach ($f in @(Get-ChildItem -LiteralPath $script:ConfigDir -Filter $pat -Force -ErrorAction SilentlyContinue)) {
+                    [void]$items.Add([pscustomobject]@{ Path = $f.FullName; Kind = '文件'; Why = '配置写入残留' })
+                }
+            } catch { }
+        }
+        # 旧日志（保留最新，其余列出）
+        try {
+            $logs = @(Get-ChildItem -LiteralPath $script:ConfigDir -Filter '*.log' -Force -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -Skip 1)
+            foreach ($f in $logs) {
+                [void]$items.Add([pscustomobject]@{ Path = $f.FullName; Kind = '文件'; Why = '历史日志（保留最新一份）' })
+            }
+        } catch { }
+    }
+
+    # 3) 桌面上的导出文件
+    try {
+        $desk = [Environment]::GetFolderPath('Desktop')
+        if ($desk) {
+            foreach ($pat in @('app.asar.injected-*', 'AuraScreensaver-诊断-*.txt')) {
+                foreach ($f in @(Get-ChildItem -LiteralPath $desk -Filter $pat -Force -ErrorAction SilentlyContinue)) {
+                    [void]$items.Add([pscustomobject]@{ Path = $f.FullName; Kind = '文件'; Why = '手动绕过时导出的补丁/诊断' })
+                }
+            }
+        }
+    } catch { }
+
+    # 4) 旧的备份目录（screen_saver_backup_*，只保留最新两份）
+    try {
+        $ss = Get-ScreenSaverDir
+        if (Test-Path -LiteralPath $ss) {
+            $parent = Split-Path -Parent $ss
+            $baks = @(Get-ChildItem -LiteralPath $parent -Directory -Filter 'screen_saver_backup_*' -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -Skip 2)
+            foreach ($d in $baks) {
+                [void]$items.Add([pscustomobject]@{ Path = $d.FullName; Kind = '目录'; Why = '旧的屏保图片备份（保留最新两份）' })
+            }
+        }
+    } catch { }
+
+    return $items
+}
+
+function Invoke-CleanupDialog {
+    $items = @(Get-CleanupCandidates)
+
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = '清理无用文件'
+    $dlg.Size = New-Object System.Drawing.Size(820, 560)
+    $dlg.StartPosition = 'CenterParent'
+
+    $top = New-Object System.Windows.Forms.Label
+    $top.Dock = 'Top'
+    $top.Height = 56
+    $top.Padding = New-Object System.Windows.Forms.Padding(10, 8, 10, 4)
+    if ($items.Count -eq 0) {
+        $top.Text = '没有发现需要清理的文件。'
+    } else {
+        $top.Text = ('找到 ' + $items.Count + ' 项本软件产生的无用文件。' + $script:NL +
+            '（只清理自己产生的探测/临时/导出文件；官方文件与 .bak 备份一律不动）')
+    }
+    $dlg.Controls.Add($top)
+
+    $bar = New-Object System.Windows.Forms.Panel
+    $bar.Dock = 'Bottom'
+    $bar.Height = 52
+
+    $btnAll = New-Object System.Windows.Forms.Button
+    $btnAll.Text = '全选'
+    $btnAll.Size = New-Object System.Drawing.Size(80, 32)
+    $btnAll.Location = New-Object System.Drawing.Point(10, 9)
+    $btnNone = New-Object System.Windows.Forms.Button
+    $btnNone.Text = '全不选'
+    $btnNone.Size = New-Object System.Drawing.Size(80, 32)
+    $btnNone.Location = New-Object System.Drawing.Point(98, 9)
+    $btnDel = New-Object System.Windows.Forms.Button
+    $btnDel.Text = '删除选中项'
+    $btnDel.Size = New-Object System.Drawing.Size(140, 32)
+    $btnDel.Location = New-Object System.Drawing.Point(560, 9)
+    $btnClose3 = New-Object System.Windows.Forms.Button
+    $btnClose3.Text = '关闭'
+    $btnClose3.Size = New-Object System.Drawing.Size(90, 32)
+    $btnClose3.Location = New-Object System.Drawing.Point(710, 9)
+    $btnClose3.add_Click({ $dlg.Close() })
+
+    $list = New-Object System.Windows.Forms.CheckedListBox
+    $list.Dock = 'Fill'
+    $list.CheckOnClick = $true
+    $list.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 8)
+    foreach ($it in $items) {
+        [void]$list.Items.Add(('[' + $it.Kind + '] ' + $it.Path + '   — ' + $it.Why), $true)
+    }
+
+    $btnAll.add_Click({ for ($i = 0; $i -lt $list.Items.Count; $i++) { $list.SetItemChecked($i, $true) } })
+    $btnNone.add_Click({ for ($i = 0; $i -lt $list.Items.Count; $i++) { $list.SetItemChecked($i, $false) } })
+
+    $btnDel.add_Click({
+        $ok = $false
+        $fail = 0
+        for ($i = 0; $i -lt $list.Items.Count; $i++) {
+            if (-not $list.GetItemChecked($i)) { continue }
+            $p = $items[$i].Path
+            try {
+                if ($items[$i].Kind -eq '目录') { Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop }
+                else { Remove-Item -LiteralPath $p -Force -ErrorAction Stop }
+                $ok = $true
+            } catch { $fail++ }
+        }
+        if ($fail -gt 0) {
+            [System.Windows.Forms.MessageBox]::Show(('有 ' + $fail + ' 项删除失败（可能正在被占用）。'), '部分失败', 'OK', 'Warning') | Out-Null
+        } elseif ($ok) {
+            [System.Windows.Forms.MessageBox]::Show('清理完成。', '完成', 'OK', 'Information') | Out-Null
+        }
+        $dlg.Close()
+    })
+
+    $bar.Controls.Add($btnAll)
+    $bar.Controls.Add($btnNone)
+    $bar.Controls.Add($btnDel)
+    $bar.Controls.Add($btnClose3)
+    $dlg.Controls.Add($list)
+    $dlg.Controls.Add($bar)
+    [void]$dlg.ShowDialog($form)
+}
+
+# ---------------------------------------------------------------------------
 
 function Get-DiagnosticReport {
     $lines = @()
@@ -520,6 +675,18 @@ $linkDiag.Text = '诊断'
 $linkDiag.AutoSize = $true
 $linkDiag.Margin = New-Object System.Windows.Forms.Padding(14, 12, 3, 3)
 $flowBottom.Controls.Add($linkDiag)
+
+$linkClean = New-Object System.Windows.Forms.LinkLabel
+$linkClean.Text = '清理'
+$linkClean.AutoSize = $true
+$linkClean.Margin = New-Object System.Windows.Forms.Padding(14, 12, 3, 3)
+$flowBottom.Controls.Add($linkClean)
+
+$linkSwap = New-Object System.Windows.Forms.LinkLabel
+$linkSwap.Text = '临时换图（免安装）'
+$linkSwap.AutoSize = $true
+$linkSwap.Margin = New-Object System.Windows.Forms.Padding(14, 12, 3, 3)
+$flowBottom.Controls.Add($linkSwap)
 $script:PanelBottom = $panelBottom
 
 # ---- 中间：可滚动区 ----
@@ -630,13 +797,16 @@ $flowFit.Controls.Add($rbCover)
 $table.Controls.Add((New-AuraRowLabel '图片列表'))
 $imgPanel = New-Object System.Windows.Forms.Panel
 $imgPanel.Anchor = 'Left,Right'
-$imgPanel.Height = 168
+$imgPanel.Height = 176
 $imgPanel.Margin = New-Object System.Windows.Forms.Padding(3, 4, 3, 4)
 
+# ★ 按钮行允许换行：窗口窄/高DPI 时按钮不会互相压住
 $imgBar = New-Object System.Windows.Forms.FlowLayoutPanel
 $imgBar.Dock = 'Top'
-$imgBar.Height = 34
-$imgBar.WrapContents = $false
+$imgBar.AutoSize = $true
+$imgBar.AutoSizeMode = 'GrowAndShrink'
+$imgBar.WrapContents = $true
+$imgBar.MinimumSize = New-Object System.Drawing.Size(0, 34)
 
 $btnPickFolder = New-Object System.Windows.Forms.Button
 $btnPickFolder.Text = '选择文件夹…'
@@ -669,11 +839,12 @@ $txtImages.ScrollBars = 'Vertical'
 $txtImages.AcceptsReturn = $true
 $txtImages.Dock = 'Fill'
 $txtImages.Font = New-Object System.Drawing.Font('Consolas', 8)
-$imgPanel.Controls.Add($txtImages)
 
-# 顺序：先加 Fill 再加 Top，否则 Top 会被遮住
-$imgPanel.Controls.SetChildIndex($txtImages, 1)
-$imgPanel.Controls.SetChildIndex($imgBar, 0)
+# ★ 顺序很重要：Fill 的控件必须**先**加，Top/Bottom 后加，
+#   否则 Dock 计算会把 Fill 挤到 0 高度（上一版就是这样崩的）。
+$imgPanel.Controls.Add($txtImages)
+$imgPanel.Controls.Add($imgBar)
+$txtImages.BringToFront()
 $table.Controls.Add($imgPanel)
 
 $table.Controls.Add((New-AuraRowLabel '图文条目'))
@@ -1002,6 +1173,8 @@ function Refresh-UiState {
         $btnUninstall.Visible = $true
         $linkLog.Visible = $true
         $linkDiag.Visible = $true
+        $linkClean.Visible = $true
+        $linkSwap.Visible = $true
         if ($script:PanelBottom) { $script:PanelBottom.Visible = $true }
 
         if (-not $script:FormLoaded) {
@@ -2081,6 +2254,8 @@ $btnPickFiles.add_Click({
 $txtImages.add_TextChanged({ Update-ImageCountHint })
 $btnPreviewImgs.add_Click({ Show-ImagePreviewDialog })
 $linkDiag.add_Click({ Show-DiagnosticDialog })
+$linkClean.add_Click({ Invoke-CleanupDialog })
+$linkSwap.add_Click({ Show-ImageSwapDialog })
 
 $btnSavePreview.add_Click({
     try {
