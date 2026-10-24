@@ -152,6 +152,158 @@ function Get-HostProcs {
     return $all
 }
 
+# 判断注入是否真的生效（不看进程在不在，看日志里加载器是否报 hook:true）
+function Test-LoaderActive {
+    if (-not (Test-Path -LiteralPath $script:LogPath)) { return $false }
+    try {
+        $t = [System.IO.File]::ReadAllText($script:LogPath, [System.Text.Encoding]::UTF8)
+        if ($t -match '"hook":true') { return $true }
+        return $false
+    } catch { return $false }
+}
+
+# 状态文案：区分「进程在跑」和「注入生效」——安全模式里进程会在但注入无效
+function Get-RuntimeText {
+    $procs = (Get-HostProcs).Count
+    $active = Test-LoaderActive
+    if ($active) { return ('运行中（注入已生效，进程 ' + $procs + ' 个）') }
+    if ($procs -gt 0) { return ('运行中（注入未生效，进程 ' + $procs + ' 个）') }
+    return '未运行'
+}
+
+# ---------------------------------------------------------------------------
+# 首页诊断：未安装时也能看到各组件状态，方便对比「装之前 / 装之后」
+# ---------------------------------------------------------------------------
+
+function Get-DiagnosticReport {
+    $lines = @()
+
+    $lines += '【本程序】'
+    $lines += '  注入版本：' + $script:InjectionVersion
+    $lines += '  系统：' + [Environment]::OSVersion.VersionString
+    $lines += '  管理员：' + (Test-IsAdmin)
+    $lines += '  安全模式：' + (Test-IsSafeMode)
+    $lines += ''
+
+    $lines += '【安装目录】'
+    $st = Get-InjectionState
+    if ($st.Dir) { $lines += '  ' + $st.Dir } else { $lines += '  未找到' }
+    $lines += '  app.asar：' + $(if ($st.AsarExists) { '存在' } else { '不存在' })
+    $lines += '  备份 .bak：' + $(if ($st.BakExists) { '存在' } else { '不存在' })
+    $lines += '  已注入：' + $(if ($st.Injected) { '是' } else { '否' })
+    $lines += ''
+
+    $lines += '【希沃进程】（SeewoServiceAssistant 子进程数量是关键指标）'
+    $hostProcs = @(Get-HostProcs)
+    $lines += '  SeewoServiceAssistant：' + $hostProcs.Count + ' 个'
+    $lines += '  期望：1 个主进程 + 3 个子进程 = 4 个'
+    $lines += ''
+    foreach ($n in @('SeewoCore', 'SeewoAbility', 'EasiAgent', 'ResidentSideBar', 'SeewoIwbAssistant', 'SeewoFreezeUpdateAssist', 'proxyLayerService')) {
+        $c = @(Get-Process -Name $n -ErrorAction SilentlyContinue).Count
+        $lines += ('  ' + $n.PadRight(26) + $c + ' 个')
+    }
+    $lines += ''
+
+    $lines += '【希沃服务】'
+    foreach ($n in @('SeewoCoreService', 'SeewoFreezeUpdateAssist', 'SeewoProxyLayerService')) {
+        try {
+            $svc = Get-Service -Name $n -ErrorAction Stop
+            $lines += ('  ' + $n.PadRight(26) + $svc.Status + ' / ' + $svc.StartType)
+        } catch {
+            $lines += ('  ' + $n.PadRight(26) + '不存在')
+        }
+    }
+    $lines += ''
+
+    $lines += '【加载器】'
+    $lines += '  日志：' + $script:LogPath
+    $lines += '  日志存在：' + (Test-Path -LiteralPath $script:LogPath)
+    $lines += '  注入生效(hook:true)：' + (Test-LoaderActive)
+    if (Test-Path -LiteralPath $script:LogPath) {
+        try {
+            $tail = @(Get-Content -LiteralPath $script:LogPath -Tail 200 -ErrorAction SilentlyContinue)
+            $hits = @($tail | Where-Object { $_ -match 'hook|app ready|按特征命中|诊断|已安装' })
+            if ($hits.Count -gt 0) {
+                $lines += ''
+                $lines += '  最近相关日志：'
+                foreach ($h in ($hits | Select-Object -Last 8)) { $lines += '    ' + $h }
+            }
+        } catch { }
+    }
+    $lines += ''
+
+    $lines += '【命令桥】'
+    $lines += '  command.json：' + (Test-Path -LiteralPath $script:CommandPath)
+    $lines += '  command-result.json：' + (Test-Path -LiteralPath $script:ResultPath)
+
+    return ($lines -join $script:NL)
+}
+
+function Show-DiagnosticDialog {
+    $txt = New-Object System.Windows.Forms.Form
+    $txt.Text = '诊断信息'
+    $txt.Size = New-Object System.Drawing.Size(760, 620)
+    $txt.StartPosition = 'CenterParent'
+    $txt.Font = New-Object System.Drawing.Font('Consolas', 9)
+
+    $box = New-Object System.Windows.Forms.TextBox
+    $box.Multiline = $true
+    $box.ReadOnly = $true
+    $box.ScrollBars = 'Both'
+    $box.WordWrap = $false
+    $box.Dock = 'Fill'
+    $box.Font = New-Object System.Drawing.Font('Consolas', 9)
+    $box.Text = Get-DiagnosticReport
+
+    $bar = New-Object System.Windows.Forms.Panel
+    $bar.Dock = 'Bottom'
+    $bar.Height = 46
+
+    $btnCopy = New-Object System.Windows.Forms.Button
+    $btnCopy.Text = '复制全部'
+    $btnCopy.Size = New-Object System.Drawing.Size(110, 32)
+    $btnCopy.Location = New-Object System.Drawing.Point(12, 7)
+    $btnCopy.add_Click({
+        try { [System.Windows.Forms.Clipboard]::SetText($box.Text) } catch { }
+    })
+
+    $btnSave = New-Object System.Windows.Forms.Button
+    $btnSave.Text = '保存到桌面'
+    $btnSave.Size = New-Object System.Drawing.Size(130, 32)
+    $btnSave.Location = New-Object System.Drawing.Point(132, 7)
+    $btnSave.add_Click({
+        try {
+            $d = [Environment]::GetFolderPath('Desktop')
+            $p = Join-Path $d ('AuraScreensaver-诊断-' + (Get-Date).ToString('yyyyMMdd-HHmmss') + '.txt')
+            [System.IO.File]::WriteAllText($p, $box.Text, [System.Text.Encoding]::UTF8)
+            [System.Windows.Forms.MessageBox]::Show('已保存到：' + $script:NL + $p, '完成', 'OK', 'Information') | Out-Null
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, '保存失败', 'OK', 'Warning') | Out-Null
+        }
+    })
+
+    $btnRefresh = New-Object System.Windows.Forms.Button
+    $btnRefresh.Text = '刷新'
+    $btnRefresh.Size = New-Object System.Drawing.Size(90, 32)
+    $btnRefresh.Location = New-Object System.Drawing.Point(272, 7)
+    $btnRefresh.add_Click({ $box.Text = Get-DiagnosticReport })
+
+    $btnClose2 = New-Object System.Windows.Forms.Button
+    $btnClose2.Text = '关闭'
+    $btnClose2.Size = New-Object System.Drawing.Size(90, 32)
+    $btnClose2.Location = New-Object System.Drawing.Point(372, 7)
+    $btnClose2.add_Click({ $txt.Close() })
+
+    $bar.Controls.Add($btnCopy)
+    $bar.Controls.Add($btnSave)
+    $bar.Controls.Add($btnRefresh)
+    $bar.Controls.Add($btnClose2)
+
+    $txt.Controls.Add($box)
+    $txt.Controls.Add($bar)
+    [void]$txt.ShowDialog($form)
+}
+
 function Stop-Host {
     $procs = Get-HostProcs
     if ($procs.Count -eq 0) { return }
@@ -362,6 +514,12 @@ $linkLog.Text = '查看日志'
 $linkLog.AutoSize = $true
 $linkLog.Margin = New-Object System.Windows.Forms.Padding(14, 12, 3, 3)
 $flowBottom.Controls.Add($linkLog)
+
+$linkDiag = New-Object System.Windows.Forms.LinkLabel
+$linkDiag.Text = '诊断'
+$linkDiag.AutoSize = $true
+$linkDiag.Margin = New-Object System.Windows.Forms.Padding(14, 12, 3, 3)
+$flowBottom.Controls.Add($linkDiag)
 $script:PanelBottom = $panelBottom
 
 # ---- 中间：可滚动区 ----
@@ -666,8 +824,7 @@ function Refresh-UiState {
     else { $script:State.ProcessRunning = ((Get-HostProcs).Count -gt 0) }
 
     $st = $script:State
-    $procText = '未运行'
-    if ($st.ProcessRunning) { $procText = '运行中' }
+    $procText = Get-RuntimeText
 
     if ($st.Injected) {
         $group.Visible = $true
@@ -676,6 +833,7 @@ function Refresh-UiState {
         $btnSavePreview.Visible = $true
         $btnUninstall.Visible = $true
         $linkLog.Visible = $true
+        $linkDiag.Visible = $true
         if ($script:PanelBottom) { $script:PanelBottom.Visible = $true }
 
         if (-not $script:FormLoaded) {
@@ -711,10 +869,13 @@ function Refresh-UiState {
         $group.Visible = $false
         $btnSavePreview.Visible = $false
         $btnUninstall.Visible = $false
-        $linkLog.Visible = $false
-        if ($script:PanelBottom) { $script:PanelBottom.Visible = $false }
         $btnInstall.Visible = $true
         $btnImageSwap.Visible = $true
+        # ★ 未安装时也显示底部栏：这样「诊断」随时可点，
+        #   方便对比装之前 / 装之后的状态。
+        $linkLog.Visible = $true
+        $linkDiag.Visible = $true
+        if ($script:PanelBottom) { $script:PanelBottom.Visible = $true }
 
         if (-not $st.AsarExists) {
             if ($st.Error) {
@@ -802,64 +963,7 @@ function Test-DirWritable {
     }
 }
 
-# 目录 ACL 被收紧时，尝试拿回管理员写权限
-# 注意：如果目录上有**显式 DENY**（常见于防篡改设计），单纯 /grant 是无效的
-#       （Windows 里 deny 优先于 allow），必须 /reset 让它继承父目录权限。
-function Try-RepairAcl {
-    param([string]$Dir)
 
-    Add-Log ('尝试修复 ACL: ' + $Dir)
-
-    # 先把当前 ACL 记进日志，便于判断到底是不是权限问题
-    try {
-        $aclText = & icacls.exe $Dir 2>&1 | Out-String
-        Add-Log ('当前 ACL:' + [Environment]::NewLine + $aclText.Trim())
-    } catch { }
-
-    try {
-        & takeown.exe /F $Dir /A 2>&1 | Out-Null
-        Add-Log ('takeown 退出码=' + $LASTEXITCODE)
-    } catch { Add-Log ('takeown 异常: ' + $_.Exception.Message) }
-
-    # /reset 让目录继承父目录权限 —— 这是清除显式 DENY 的关键一步
-    try {
-        & icacls.exe $Dir /reset 2>&1 | Out-Null
-        Add-Log ('icacls /reset 退出码=' + $LASTEXITCODE)
-    } catch { Add-Log ('icacls /reset 异常: ' + $_.Exception.Message) }
-
-    try {
-        & icacls.exe $Dir /grant '*S-1-5-32-544:(OI)(CI)F' 2>&1 | Out-Null
-        Add-Log ('icacls /grant 退出码=' + $LASTEXITCODE)
-    } catch { Add-Log ('icacls /grant 异常: ' + $_.Exception.Message) }
-
-    $ok = Test-DirWritable -Dir $Dir
-    Add-Log ('ACL 修复后是否可写: ' + $ok)
-    return $ok
-}
-
-# 结束管家进程（连带任务栏工具），并检测是否被自动拉起
-function Stop-HostForce {
-    $names = @('SeewoServiceAssistant', 'ShowTaskBarTool')
-    foreach ($n in $names) {
-        foreach ($p in @(Get-Process -Name $n -ErrorAction SilentlyContinue)) {
-            try {
-                Add-Log ('结束进程 ' + $n + ' pid=' + $p.Id)
-                $p.Kill()
-                [void]$p.WaitForExit(8000)
-            } catch { Add-Log ('结束失败 ' + $n + ': ' + $_.Exception.Message) }
-        }
-    }
-    for ($i = 0; $i -lt 25; $i++) {
-        if ((Get-HostProcs).Count -eq 0) { break }
-        Start-Sleep -Milliseconds 300
-    }
-    Start-Sleep -Milliseconds 500
-    if ((Get-HostProcs).Count -gt 0) {
-        Add-Log '注意：检测到管家被自动重新拉起（这会让 app.asar 持续被占用）'
-        return $false
-    }
-    return $true
-}
 # ---------------------------------------------------------------------------
 # 希沃自我保护探测
 #   ACL 明明给了 BUILTIN\Administrators (F) 完全控制，却连 takeown 都被拒绝，
@@ -1075,7 +1179,7 @@ function Invoke-SafeModeAutoAction {
         $o2 = & bcdedit.exe /deletevalue '{current}' safeboot 2>&1 | Out-String
         Add-Log ('已清除 safeboot: ' + $o2.Trim())
         Add-Log '操作完成，15 秒后重启回正常模式'
-        & shutdown.exe /r /t 15 /c "AuraScreensaver: 已完成，即将重启回正常模式" 2>&1 | Out-Null
+        & shutdown.exe /r /t 8 /c "AuraScreensaver: 已完成，即将重启回正常模式" 2>&1 | Out-Null
         return $true
     } catch {
         Add-Log ('安全模式自动操作失败: ' + $_.Exception.Message)
@@ -1083,7 +1187,7 @@ function Invoke-SafeModeAutoAction {
         try { & bcdedit.exe /deletevalue '{current}' safeboot 2>&1 | Out-Null } catch { }
         try { Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' -Name 'AuraScreensaver_SafeInstall' -ErrorAction SilentlyContinue } catch { }
         Add-Log '已撤除安全模式设置，15 秒后重启回正常模式'
-        & shutdown.exe /r /t 15 /c "AuraScreensaver: 操作失败，已恢复正常启动" 2>&1 | Out-Null
+        & shutdown.exe /r /t 8 /c "AuraScreensaver: 操作失败，已恢复正常启动" 2>&1 | Out-Null
         return $false
     }
 }
@@ -1340,7 +1444,7 @@ function Complete-SafeModeIfNeeded {
     } catch { Add-Log ('bcdedit 失败: ' + $_.Exception.Message) }
 
     try {
-        & shutdown.exe /r /t 20 /c "AuraScreensaver: 已完成，即将重启回正常模式" 2>&1 | Out-Null
+        & shutdown.exe /r /t 8 /c "AuraScreensaver: 已完成，即将重启回正常模式" 2>&1 | Out-Null
         Add-Log '已安排 20 秒后重启回正常模式'
     } catch { Add-Log ('安排重启失败: ' + $_.Exception.Message) }
 
@@ -1399,142 +1503,11 @@ function Write-SafeModeRecoveryBat {
     }
 }
 
-# ---------------------------------------------------------------------------
 
-function Get-SuspectBlockers {
-    $known = [ordered]@{
-        'ZhuDongFangYu'      = '360安全卫士-主动防御'
-        '360tray'            = '360安全卫士'
-        '360Safe'            = '360安全卫士'
-        'QQPCTray'           = '腾讯电脑管家'
-        'HipsTray'           = '火绒安全'
-        'EasiUpdate3Protect' = '希沃更新保护'
-        'EasiUpdate3'        = '希沃更新'
-        'SeewoCore'          = '希沃核心服务'
-        'Sia.Guard'          = '希沃守卫'
-    }
-    $hits = @()
-    foreach ($k in $known.Keys) {
-        if (@(Get-Process -Name $k -ErrorAction SilentlyContinue).Count -gt 0) {
-            $hits += ($k + '  (' + $known[$k] + ')')
-        }
-    }
-    return ,$hits
-}
 
-# 细分测试：分别试「新建文件」和「新建目录」，判断哪类操作被拦
-function Invoke-WriteDiagnostics {
-    param([string]$Dir)
-    Add-Log '--- 写能力细分测试 ---'
-    $fileOk = $false
-    $dirOk = $false
-    $subFileOk = $false
-    $probe = Join-Path $Dir ('.aura-diag-' + [System.Guid]::NewGuid().ToString('N'))
 
-    # 1) 新建文件
-    try {
-        [System.IO.File]::WriteAllText($probe + '.tmp', 'x')
-        $fileOk = $true
-        Add-Log '新建文件: 成功'
-        Remove-Item ($probe + '.tmp') -Force -ErrorAction SilentlyContinue
-    } catch { Add-Log ('新建文件: 被拒绝 -> ' + $_.Exception.Message) }
 
-    # 2) 新建目录
-    try {
-        New-Item -ItemType Directory -Path $probe -Force -ErrorAction Stop | Out-Null
-        $dirOk = $true
-        Add-Log '新建目录: 成功'
-    } catch { Add-Log ('新建目录: 被拒绝 -> ' + $_.Exception.Message) }
 
-    # 3) 在新建的目录里再建文件
-    #    这一项决定「HugoAura 那种把 app.asar 变成目录」的做法是否可行
-    if ($dirOk) {
-        try {
-            $f2 = Join-Path $probe 'x.txt'
-            [System.IO.File]::WriteAllText($f2, 'x')
-            $subFileOk = $true
-            Add-Log '新目录内建文件: 成功（目录模式可行）'
-        } catch { Add-Log ('新目录内建文件: 被拒绝 -> ' + $_.Exception.Message) }
-        Remove-Item -LiteralPath $probe -Recurse -Force -ErrorAction SilentlyContinue
-    }
-
-    return [pscustomobject]@{ FileOk = $fileOk; DirOk = $dirOk; SubFileOk = $subFileOk }
-}
-
-# 尝试结束可疑保护进程（需用户确认）
-function Try-StopBlockers {
-    param($Names)
-    $done = @()
-    foreach ($n in @($Names)) {
-        $procName = ($n -split '  ')[0].Trim()
-        foreach ($p in @(Get-Process -Name $procName -ErrorAction SilentlyContinue)) {
-            try {
-                Add-Log ('尝试结束保护进程: ' + $procName + ' pid=' + $p.Id)
-                $p.Kill()
-                [void]$p.WaitForExit(5000)
-                $done += $procName
-                Add-Log ('已结束: ' + $procName)
-            } catch { Add-Log ('结束失败 ' + $procName + ': ' + $_.Exception.Message) }
-        }
-    }
-    Start-Sleep -Milliseconds 800
-    return ,$done
-}
-
-function Add-ProtectionFacts {
-    Add-Log '--- 希沃相关服务 ---'
-    $found = 0
-    try {
-        $svcList = @(Get-CimInstance Win32_Service -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '(?i)seewo' -or $_.DisplayName -match '希沃|Seewo' })
-        foreach ($s in $svcList) {
-            $found++
-            Add-Log ('服务: ' + $s.Name + ' | ' + $s.DisplayName + ' | 状态=' + $s.State + ' | 启动=' + $s.StartMode + ' | ' + $s.PathName)
-        }
-        if ($found -eq 0) { Add-Log '未发现希沃相关服务' }
-    } catch { Add-Log ('枚举服务失败: ' + $_.Exception.Message) }
-
-    Add-Log '--- 疑似希沃驱动 ---'
-    try {
-        $all = & sc.exe query type= driver state= all 2>&1 | Out-String
-        $hits = @($all -split '\r?\n' | Where-Object { $_ -match '(?i)seewo' })
-        if ($hits.Count -eq 0) {
-            Add-Log '驱动列表中未出现 seewo 字样（保护可能由进程自身或其它驱动持有）'
-        } else {
-            foreach ($line in $hits) { Add-Log ('  ' + $line.Trim()) }
-        }
-    } catch { Add-Log ('枚举驱动失败: ' + $_.Exception.Message) }
-}
-
-function Try-StopProtection {
-    $stopped = @()
-    try {
-        $svcList = @(Get-Service -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '(?i)seewo' -or $_.DisplayName -match '希沃|Seewo' })
-        foreach ($s in $svcList) {
-            if ([string]$s.Status -eq 'Stopped') { continue }
-            try {
-                Add-Log ('尝试停止服务: ' + $s.Name)
-                Stop-Service -Name $s.Name -Force -ErrorAction Stop
-                $stopped += $s.Name
-                Add-Log ('已停止: ' + $s.Name)
-            } catch { Add-Log ('停止失败 ' + $s.Name + ': ' + $_.Exception.Message) }
-        }
-    } catch { Add-Log ('停止服务异常: ' + $_.Exception.Message) }
-    Start-Sleep -Seconds 1
-    return ,$stopped
-}
-
-function Restore-Protection {
-    param($Names)
-    if (-not $Names) { return }
-    foreach ($n in @($Names)) {
-        try {
-            Add-Log ('恢复启动服务: ' + $n)
-            Start-Service -Name $n -ErrorAction Stop
-        } catch { Add-Log ('恢复失败 ' + $n + ': ' + $_.Exception.Message) }
-    }
-}
 
 # 把打好补丁的 app.asar 导出到桌面，供保护无法解除时手动替换
 function Export-PatchedAsar {
@@ -1557,7 +1530,6 @@ function Export-PatchedAsar {
 # 一键安装（先只读生成并校验，再决定写哪里；原子替换）
 # ---------------------------------------------------------------------------
 
-$script:PendingRestore = @()
 
 $btnInstall.add_Click({
     Initialize-InstallerLog
@@ -1646,147 +1618,23 @@ $btnInstall.add_Click({
         Add-Log ('暂存校验通过: 条目数=' + $vLeaves.Count + '，大小=' + (Get-Item -LiteralPath $staged).Length + ' 字节')
 
         # ---------- 3. 写权限 ----------
+        # ★ 已实测：希沃的 SeewoZoroWall/SeewoKeLiteLady 是内核驱动，
+        #   正常模式下「新建文件」一律被拒；ACL 明明是 Administrators(F)，
+        #   连 takeown / icacls 都被拒绝。
+        #   试过并已证明无效的路子：改 ACL、结束保护进程、停希沃服务、
+        #   目录模式（新目录内建文件同样被拒）。因此这里不再做无用尝试，
+        #   直接走安全模式——那是唯一可行的路径。
         Set-Status '正在检查写权限…'
         $writable = Test-DirWritable -Dir $resourcesDir
 
         if (-not $writable) {
-            Add-Log '目录不可写。注意：ACL 中 Administrators 已有(F)，说明是保护驱动在拦截'
-            $writable = Try-RepairAcl -Dir $resourcesDir
-        }
-
-        if (-not $writable) {
-            Add-ProtectionFacts
-            $diag = Invoke-WriteDiagnostics -Dir $resourcesDir
-
-            $suspects = Get-SuspectBlockers
-            if (@($suspects).Count -gt 0) {
-                Add-Log ('检测到保护类进程: ' + (@($suspects) -join ' | '))
-            } else {
-                Add-Log '未发现已知的保护类进程'
-            }
-
-            # 先尝试结束保护进程（360 通常杀不掉，希沃的能杀）
-            $ans = [System.Windows.Forms.MessageBox]::Show(
-                ('写入被拦截了：新建文件=' + $diag.FileOk + '，新建目录=' + $diag.DirOk + '。' + $script:NL + $script:NL +
-                 '拦截者是希沃的内核驱动（SeewoZoroWall / SeewoKeLiteLady），' + $script:NL +
-                 'ACL 里管理员已是完全控制，但连 takeown 都被拒绝。' + $script:NL + $script:NL +
-                 '先试一次【结束保护进程 + 停希沃服务】？'),
-                '写入被驱动拦截', 'OKCancel', 'Warning')
-
-            if ($ans -eq 'OK') {
-                Set-Status '正在尝试结束保护进程…'
-                $killed = Try-StopBlockers -Names $suspects
-                Add-Log ('已结束的进程: ' + (@($killed) -join ', '))
-                $script:PendingRestore = Try-StopProtection
-                $writable = Test-DirWritable -Dir $resourcesDir
-                Add-Log ('处理后是否可写: ' + $writable)
-            }
-        }
-
-        # ---------- 3a. 目录模式（HugoAura 做法）----------
-        if (-not $writable) {
-            $subOk = $false
-            if ($null -ne $diag) { $subOk = [bool]$diag.SubFileOk }
-
-            if ($subOk) {
-                $tryDir = [System.Windows.Forms.MessageBox]::Show(
-                    ('还有一条路：HugoAura 的「目录模式」。' + $script:NL + $script:NL +
-                     '做法是把 app.asar 从「文件」变成「目录」，里面放解包后的文件。' + $script:NL +
-                     '你的机器上「新建目录」是允许的，所以这条值得一试。' + $script:NL + $script:NL +
-                     '失败会自动回滚，不会弄坏原文件。要试吗？'),
-                    '可以试目录模式', 'YesNo', 'Question')
-
-                if ($tryDir -eq 'Yes') {
-                    Set-Status '正在尝试目录模式…'
-                    $dm = Install-DirectoryMode -Dir $dir -PatchText $res.Text
-                    if ($dm.Ok) {
-                        Add-Log '目录模式：写入成功，准备重启管家'
-                        Set-Status '正在重启希沃管家…'
-                        if (Test-Path -LiteralPath $script:LogPath) {
-                            Remove-Item -LiteralPath $script:LogPath -Force -ErrorAction SilentlyContinue
-                        }
-                        $started2 = Start-Host -Dir $dir
-                        Add-Log ('重启管家: ' + $started2)
-                        Set-Status '正在确认加载器已运行…'
-                        $dl2 = (Get-Date).AddSeconds(30)
-                        $ready2 = $false
-                        while ((Get-Date) -lt $dl2) {
-                            if (Test-Path -LiteralPath $script:LogPath) {
-                                try {
-                                    $lt = [System.IO.File]::ReadAllText($script:LogPath, [System.Text.Encoding]::UTF8)
-                                    if ($lt.Contains('命令桥已启动')) { $ready2 = $true; break }
-                                } catch { }
-                            }
-                            Start-Sleep -Milliseconds 800
-                        }
-                        Add-Log ('加载器就绪: ' + $ready2)
-                        Refresh-UiState -Full
-                        [System.Windows.Forms.MessageBox]::Show(
-                            ('目录模式安装成功！' + $script:NL + $script:NL +
-                             '加载器就绪: ' + $ready2 + $script:NL + $script:NL +
-                             '现在可以配置并预览了。'),
-                            '安装成功', 'OK', 'Information') | Out-Null
-                        return
-                    } else {
-                        Add-Log ('目录模式失败于步骤: ' + $dm.Step + ' -> ' + $dm.Message)
-                        [System.Windows.Forms.MessageBox]::Show(
-                            ('目录模式也不行，卡在步骤：' + $dm.Step + $script:NL + $dm.Message + $script:NL + $script:NL +
-                             '继续走安全模式方案。'),
-                            '目录模式失败', 'OK', 'Warning') | Out-Null
-                    }
-                }
-            } else {
-                Add-Log '新目录内建文件被拒绝，目录模式不可行，跳过'
-            }
-        }
-
-        # ---------- 3b. 仍不可写 → 安全模式自动安装 ----------
-        if (-not $writable) {
-            $isSafe = Test-IsSafeMode
-            if ($isSafe) {
-                throw ('当前已在安全模式下，但目录仍不可写。' + $script:NL +
-                    '这可能意味着还有其它保护（如杀软驱动）。请把日志发我。')
-            }
-
-            $pick = [System.Windows.Forms.MessageBox]::Show(
-                ('驱动还在拦，正常模式下无法写入。' + $script:NL + $script:NL +
-                 '【推荐】重启到安全模式自动安装：' + $script:NL +
-                 '  安全模式不加载希沃/杀软的第三方驱动，那时写入一定能成功。' + $script:NL +
-                 '  程序会自动完成：注入 → 关掉安全模式 → 重启回正常。' + $script:NL +
-                 '  并在桌面放一个「退出安全模式.bat」急救（万一卡住可双击恢复）。' + $script:NL + $script:NL +
-                 '点「是」= 立即重启去安全模式自动安装' + $script:NL +
-                 '点「否」= 只把补丁文件导到桌面，我自己手动弄'),
-                '需要安全模式才能写入', 'YesNoCancel', 'Question')
-
-            if ($pick -eq 'Cancel') {
-                Add-Log '用户取消'
+            Add-Log '正常模式写入被拦（内核驱动），直接转安全模式（不再做无用尝试）'
+            if (-not (Test-IsSafeMode)) {
+                Add-Log '转入安全模式安装流程'
+                Show-SafeModePrompt
                 return
             }
-
-            if ($pick -eq 'Yes') {
-                try {
-                    Set-Status '正在准备重启到安全模式…'
-                    $recovery = Invoke-EnterSafeModeAction -Action 'install'
-                    Add-Log '已安排安全模式自动安装，10 秒后重启'
-                    [System.Windows.Forms.MessageBox]::Show(
-                        ('已设置好，10 秒后自动重启进入安全模式。' + $script:NL + $script:NL +
-                         '接下来全自动，不用你操作：' + $script:NL +
-                         '  1) 电脑重启进安全模式' + $script:NL +
-                         '  2) 你登录后程序自动运行并完成注入' + $script:NL +
-                         '  3) 自动关掉安全模式并重启回正常' + $script:NL + $script:NL +
-                         '急救：万一卡在安全模式，双击桌面的「退出安全模式.bat」即可恢复。'),
-                        '即将重启', 'OK', 'Information') | Out-Null
-                    return
-                } catch {
-                    Add-Log ('设置安全模式失败: ' + $_.Exception.Message)
-                    [System.Windows.Forms.MessageBox]::Show(
-                        ('无法设置安全模式：' + $_.Exception.Message + $script:NL + $script:NL +
-                         '请尝试手动：Win+R 输入 msconfig → 引导 → 安全引导 → 最小 → 重启。'),
-                        '设置失败', 'OK', 'Error') | Out-Null
-                    return
-                }
-            }
-            # 选「否」→ 走下面的导出流程
+            throw ('当前已在安全模式，但目录仍不可写。日志：' + $script:NL + $script:InstallLog)
         }
 
 # ---------- 4. 仍不可写 → 导出保底 ----------
@@ -1815,7 +1663,7 @@ $btnInstall.add_Click({
 
         # ---------- 5. 停管家 ----------
         Set-Status '正在结束希沃管家…'
-        $stopped = Stop-HostForce
+        $stopped = Stop-Host
         if (-not $stopped) { Add-Log '警告：管家仍在运行，继续尝试写入' }
 
         # ---------- 6. 备份 + 原子替换 ----------
@@ -1912,11 +1760,6 @@ $btnInstall.add_Click({
         [System.Windows.Forms.MessageBox]::Show($msg, '安装失败', 'OK', 'Error') | Out-Null
     } finally {
         if ($stageDir) { Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction SilentlyContinue }
-        if ($script:PendingRestore -and @($script:PendingRestore).Count -gt 0) {
-            Add-Log '恢复希沃服务…'
-            Restore-Protection -Names $script:PendingRestore
-            $script:PendingRestore = @()
-        }
         $btnInstall.Enabled = $true
     }
 })
@@ -1926,6 +1769,7 @@ $btnInstall.add_Click({
 # ---------------------------------------------------------------------------
 
 $btnImageSwap.add_Click({ Show-ImageSwapDialog })
+$linkDiag.add_Click({ Show-DiagnosticDialog })
 
 $btnSavePreview.add_Click({
     try {

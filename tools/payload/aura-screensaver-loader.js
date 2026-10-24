@@ -779,6 +779,16 @@
     var c = null;
     try { c = req(120); } catch (e) { log.debug('req(120) 抛错: ' + (e && e.message || e)); }
     if (looksLikeScreensaver(c)) return unwrapExport(c) || c;
+    // 空壳 = 工厂曾抛异常被缓存；清掉缓存后重取一次
+    if (isPoisoned(c)) {
+      if (clearPoisonedCache(req, 120)) {
+        log.info('已清除模块 120 的污染缓存，重新执行工厂');
+        try {
+          var c2 = req(120);
+          if (looksLikeScreensaver(c2)) return unwrapExport(c2) || c2;
+        } catch (e2) { log.warn('重取 req(120) 仍失败: ' + (e2 && e2.message || e2)); }
+      }
+    }
     return resolveByScan(req, 'screensaverTransitionList', looksLikeScreensaver, log, '屏保控制器');
   }
 
@@ -786,6 +796,15 @@
     var w = null;
     try { w = req(69); } catch (e) { log.debug('req(69) 抛错: ' + (e && e.message || e)); }
     if (looksLikeWindowManager(w)) return unwrapExport(w) || w;
+    if (isPoisoned(w)) {
+      if (clearPoisonedCache(req, 69)) {
+        log.info('已清除模块 69 的污染缓存，重新执行工厂');
+        try {
+          var w2 = req(69);
+          if (looksLikeWindowManager(w2)) return unwrapExport(w2) || w2;
+        } catch (e2) { log.warn('重取 req(69) 仍失败: ' + (e2 && e2.message || e2)); }
+      }
+    }
     return resolveByScan(req, 'resetWindow', looksLikeWindowManager, log, '窗口管理器');
   }
   /* ------------------------------------------------------------------ *
@@ -802,6 +821,91 @@
     return t;
   }
 
+  /* ------------------------------------------------------------------ *
+   * 等待 Electron app ready 后再定位模块（★ 这是真正的根因修复）
+   *
+   * 实测日志：req(120) 抛错 "The 'screen' module can't be used before the
+   * app 'ready' event"。模块 69/120 在工厂里就访问了 electron.screen，
+   * 而我们的加载器在文件末尾执行时 app 还没 ready。
+   *
+   * ★ 致命之处：webpack 的 n(s) 是
+   *     if(t[s]) return t[s].exports;
+   *     var r = t[s] = {i:s, l:!1, exports:{}};   // 先塞缓存
+   *     e[s].call(r.exports, r, r.exports, n)     // 抛异常也没回滚缓存
+   *   所以第一次失败后，缓存里留下了空 exports —— 之后永远返回那个空对象。
+   *   单纯重试毫无意义（这正是之前 30 次重试全部拿到 (空对象) 的原因）。
+   *
+   * 正确做法：
+   *   1) 等 app ready（或已有的 browser-window-created 等生命周期事件）
+   *   2) 清掉被污染的缓存条目 n.c[id]，强制 webpack 重新执行工厂
+   *   3) 再取模块
+   * ------------------------------------------------------------------ */
+
+  function getElectronApp(req) {
+    try {
+      var el = req(0);              // 模块 0 = electron
+      return (el && el.app) || null;
+    } catch (e) { return null; }
+  }
+
+  /** 清掉某模块被污染的缓存，让 webpack 下次重新执行它的工厂 */
+  function clearPoisonedCache(req, id) {
+    try {
+      var cache = req.c;
+      if (cache && Object.prototype.hasOwnProperty.call(cache, id)) {
+        delete cache[id];
+        return true;
+      }
+    } catch (e) { }
+    return false;
+  }
+
+  /** 判断某个模块当前取到的是不是「被污染的空壳」 */
+  function isPoisoned(v) {
+    if (!v) return true;
+    if (typeof v !== 'object' && typeof v !== 'function') return true;
+    try { return Object.keys(v).length === 0; } catch (e) { return false; }
+  }
+
+  /**
+   * 在 app ready 之后执行 fn。已是 ready 状态就直接执行。
+   * 不依赖 app.whenReady 的 Promise（不同 Electron 版本行为略有差异），
+   * 优先用事件 + isReady 轮询双保险。
+   */
+  function whenAppReady(req, log, fn) {
+    var app = getElectronApp(req);
+    if (!app) { log.warn('取不到 electron.app —— 直接尝试定位模块'); fn(); return; }
+
+    var done = false;
+    function run() {
+      if (done) return;
+      done = true;
+      try { fn(); } catch (e) { log.warn('ready 后定位异常: ' + (e && e.message || e)); }
+    }
+
+    try {
+      if (app.isReady && app.isReady()) { run(); return; }
+    } catch (e) { }
+
+    try {
+      if (typeof app.once === 'function') app.once('ready', run);
+    } catch (e) { }
+
+    // 兜底轮询：某些宿主时序不同，事件可能已错过
+    var tries = 0;
+    var timer = setInterval(function () {
+      tries++;
+      var r = false;
+      try { r = !!(app.isReady && app.isReady()); } catch (e) { }
+      if (r || tries > 100) {
+        clearInterval(timer);
+        if (r) run();
+        else { log.warn('等待 app ready 超时 —— 仍尝试定位模块'); run(); }
+      }
+    }, 200);
+    try { if (timer && typeof timer.unref === 'function') timer.unref(); } catch (e) { }
+  }
+
   function startResolverRetry(req, share, cfg, log, state, result) {
     var attempts = 0;
     var maxAttempts = 30;
@@ -813,6 +917,8 @@
       attempts++;
       try {
         if (!hooked) {
+          // 空壳先清缓存（工厂曾抛异常的场景）
+          if (clearPoisonedCache(req, 120)) { log.debug('重试前清除模块 120 缓存'); }
           var c = resolveController(req, log);
           if (c) {
             if (installScreensaverHook(c, share, cfg, log, state)) {
@@ -823,6 +929,7 @@
           }
         }
         if (!guarded) {
+          if (clearPoisonedCache(req, 69)) { log.debug('重试前清除模块 69 缓存'); }
           var w = resolveWindowManager(req, log);
           if (w) {
             if (installLockCascadeGuard(w, cfg, log, state)) {
@@ -882,7 +989,54 @@
 
       log.info('启动 aura-screensaver 加载器');
 
+      // ★ 必须等 app ready：模块 69/120 的工厂会访问 electron.screen，
+      //   未 ready 时取模块会抛异常，且 webpack 会把空 exports **永久缓存**
+      //   （n(s): 先 t[s]={exports:{}} 再执行工厂，抛异常不回滚）——
+      //   一次失败就永久失败，所以必须等到 ready 再取第一次。
+      var appReady = false;
+      try {
+        var elApp = getElectronApp(req);
+        appReady = !!(elApp && elApp.isReady && elApp.isReady());
+      } catch (e) { }
+      log.info('app ready = ' + appReady);
+
       var controller = null, windowManager = null, share = null, lockController = null;
+
+      if (!appReady) {
+        // 未 ready：先只装 share/命令桥，模块定位交给 ready 回调
+        log.info('尚未 app ready —— 推迟模块定位，等 ready 后再挂钩');
+        try { share = req(2); } catch (e) { }
+        var early = {
+          installed: false, deferred: true, state: state, config: cfg,
+          hook: false, lockCascadeGuard: false, modules: { controller: false, windowManager: false, share: !!share },
+          logFile: log.path(), version: '1.0.0'
+        };
+        g[GLOBAL_KEY] = early;
+        whenAppReady(req, log, function () {
+          log.info('app ready 达成 —— 开始定位模块');
+          try {
+            var c0 = resolveController(req, log);
+            var w0 = resolveWindowManager(req, log);
+            var s0 = null; try { s0 = req(2); } catch (e) { }
+            var h0 = installScreensaverHook(c0, s0, cfg, log, state);
+            var gd0 = installLockCascadeGuard(w0, cfg, log, state);
+            state.ok = h0 || gd0;
+            var ctl0 = installControl(c0, s0, w0, cfg, log, state);
+            early.installed = state.ok;
+            early.deferred = false;
+            early.hook = h0;
+            early.lockCascadeGuard = gd0;
+            early.control = ctl0;
+            early.modules = { controller: !!c0, windowManager: !!w0, share: !!s0 };
+            early.commandBridge = startCommandBridge(ctl0, log);
+            log.info('aura-screensaver 已安装(ready后): ' + JSON.stringify({ hook: h0, guard: gd0 }));
+            if (!(h0 && gd0)) { startResolverRetry(req, s0 || {}, cfg, log, state, early); }
+          } catch (e) {
+            log.error('ready 后安装失败: ' + (e && e.message || e));
+          }
+        });
+        return early;
+      }
 
       // 逐个 try/catch：任一模块取不到都不影响其它能力
       try { controller = resolveController(req, log); } catch (e) { log.warn('取屏保控制器失败: ' + (e.message || e)); }
