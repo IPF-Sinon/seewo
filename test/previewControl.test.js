@@ -170,14 +170,20 @@ test('没有控制器时 preview 返回结构化失败，不抛异常', () => {
   } finally { env.cleanup(); }
 });
 
-test('override 有值但图片为空 → empty-image-list，不弹空白屏保', () => {
+test('★ override 有值但图片为空 → 继续回落其它数据源，全都没有才报错', () => {
+  // 行为变更（修复「override 为空就说没有可用预览数据」）：
+  // 自定义图集为空不再直接判死，而是依次尝试
+  //   ②集控最后下发 ③picture[] 映射 ④本地 screen_saver.json
+  // 这样用户「没配图集也想知道屏保长什么样」有路可走。
+  // 本用例环境里 ②③④ 都没有 → 最终仍是失败，且错误信息要提到空图集。
   const env = bootLoader({
     config: { screensaverEnabled: true, override: { imageList: [], textList: [] } },
   });
   try {
     const r = env.g.control.preview();
     assert.equal(r.ok, false);
-    assert.equal(r.reason, 'empty-image-list');
+    assert.equal(r.reason, 'no-payload');
+    assert.match(r.message, /图片列表是空的/, '错误信息应说明自定义图集为空');
     assert.equal(env.calls.length, 0, '失败时不应调用控制器');
   } finally { env.cleanup(); }
 });

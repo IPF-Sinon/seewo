@@ -46,7 +46,7 @@ $script:ResultPath  = Join-Path $script:ConfigDir 'command-result.json'
 $script:LogPath     = Join-Path $script:ConfigDir 'aura-screensaver.log'
 $script:Utf8NoBom   = New-Object System.Text.UTF8Encoding($false)
 $script:HostNames   = @('SeewoServiceAssistant')
-if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.3.0' }
+if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.4.0' }
 
 # ---------------------------------------------------------------------------
 # 管理员权限（写入 Program Files 必需）
@@ -326,6 +326,107 @@ function Invoke-CleanupDialog {
     $dlg.Controls.Add($list)
     $dlg.Controls.Add($bar)
     [void]$dlg.ShowDialog($form)
+}
+
+# ---------------------------------------------------------------------------
+# 各配置项说明（「说明」按钮弹出）
+# ---------------------------------------------------------------------------
+
+function Get-FieldHelpText {
+    $L = @()
+    $L += '希沃屏保配置 —— 各配置项说明'
+    $L += ('=' * 46)
+    $L += ''
+    $L += '【启用屏保】'
+    $L += '  屏保总开关。关闭后，集控再下发也不会弹屏保。'
+    $L += '  注意：手动点「保存并预览」不受它限制 —— 这是故意的，'
+    $L += '        否则「我关了屏保，但想看看效果」就成了死路。'
+    $L += ''
+    $L += '【关闭屏保后自动锁屏】'
+    $L += '  关闭屏保窗口时，是否顺带进入屏幕锁。'
+    $L += '  建议不勾：希沃官方这里调用了自己并不存在的 startLock()（确定性缺陷），'
+    $L += '  本工具默认把这条级联切断，避免出现锁屏异常。'
+    $L += ''
+    $L += '【使用自定义图集】'
+    $L += '  勾上之后，下面这些设置才生效；'
+    $L += '  不勾就一直沿用集控下发的图片和文案。'
+    $L += ''
+    $L += '【素材来源（右下角文案）】'
+    $L += '  屏保右下角显示的那行小字，比如「素材来自 XX」。'
+    $L += '  ★ 这里填的是展示文案，不是图片路径！'
+    $L += '     填路径不会去找图，只会把那串路径原样显示在屏保上。'
+    $L += ''
+    $L += '【切换间隔（秒）】'
+    $L += '  每张图片停留多少秒。渲染器内部会 ×1000 转成毫秒。'
+    $L += ''
+    $L += '【图片适配】'
+    $L += '  图片比例和屏幕不一致时怎么办：'
+    $L += '    留边完整显示（contain）= 不裁剪，两侧留黑边，能看到完整画面'
+    $L += '    裁剪铺满（cover）     = 填满整个屏幕，但会裁掉超出的部分'
+    $L += ''
+    $L += '【图片列表】'
+    $L += '  要轮播的图片，每行一个完整路径。'
+    $L += '  支持 jpg / jpeg / png / bmp / gif / webp。'
+    $L += '  用「选择文件夹…」可以一次性加入整个文件夹里的所有图片。'
+    $L += ''
+    $L += '【图文条目】'
+    $L += '  屏保上显示的正文文字，每行一条。'
+    $L += '  格式：内容|出处     （出处可以省略，省略就不显示来源）'
+    $L += '  例：今天也要加油|班主任'
+    $L += '  注意：这跟「素材来源」是两处不同的文字。'
+    $L += ''
+    $L += '【转场效果】'
+    $L += '  每张图片切换时的动画编号，一共 7 种（0、1、2、3、4、5、6）。'
+    $L += '  填法三选一：'
+    $L += '    留空        = 每次切换都随机（官方默认行为）'
+    $L += '    只填 1 个   = 所有图片都用这一个，例：3'
+    $L += '    填满 N 个   = 逐图对应（N = 图片数量），例：0,3,6'
+    $L += '  不想手填可以点「随机生成」。'
+    $L += ''
+    $L += '【预览】'
+    $L += '  点「保存并预览」会立刻用当前配置唤起一次屏保，方便看效果。'
+    $L += '  数据优先级：自定义图集 > 集控最后下发 > 本机缓存的集控图。'
+    $L += '  也就是说，没配图集、集控也还没下发过时，也能预览到本机已有的内容。'
+    return ($L -join $script:NL)
+}
+
+function Show-HelpDialog {
+    $d = New-Object System.Windows.Forms.Form
+    $d.Text = '各配置项说明'
+    $d.Size = New-Object System.Drawing.Size(780, 620)
+    $d.StartPosition = 'CenterParent'
+
+    $box = New-Object System.Windows.Forms.TextBox
+    $box.Multiline = $true
+    $box.ReadOnly = $true
+    $box.ScrollBars = 'Vertical'
+    $box.Dock = 'Fill'
+    $box.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
+    $box.Text = Get-FieldHelpText
+
+    $bar = New-Object System.Windows.Forms.Panel
+    $bar.Dock = 'Bottom'
+    $bar.Height = 48
+
+    $btnOk = New-Object System.Windows.Forms.Button
+    $btnOk.Text = '知道了'
+    $btnOk.Size = New-Object System.Drawing.Size(110, 32)
+    $btnOk.Location = New-Object System.Drawing.Point(640, 8)
+    $btnOk.add_Click({ $d.Close() })
+
+    $btnCopyH = New-Object System.Windows.Forms.Button
+    $btnCopyH.Text = '复制'
+    $btnCopyH.Size = New-Object System.Drawing.Size(90, 32)
+    $btnCopyH.Location = New-Object System.Drawing.Point(540, 8)
+    $btnCopyH.add_Click({
+        try { [System.Windows.Forms.Clipboard]::SetText($box.Text) } catch { }
+    })
+
+    $bar.Controls.Add($btnOk)
+    $bar.Controls.Add($btnCopyH)
+    $d.Controls.Add($box)
+    $d.Controls.Add($bar)
+    [void]$d.ShowDialog($form)
 }
 
 # ---------------------------------------------------------------------------
@@ -642,15 +743,23 @@ function Update-StatusHeight {
 }
 
 # ---- 底部：按钮栏（固定，永远可见）----
+# ★ 底部栏原本是「固定 66px + 不换行」，而按钮+链接实测需要约 728px，
+#   窗口默认 680、最窄 460 —— 右侧的「临时换图」必定被裁掉（只见一个「临」字）。
+#   改为：行高自适应 + 允许换行 + 文案缩短。
 $panelBottom = New-Object System.Windows.Forms.Panel
-$panelBottom.Dock = 'Fill'
-$panelBottom.Height = 64
+$panelBottom.Dock = 'Top'
+$panelBottom.AutoSize = $true
+$panelBottom.AutoSizeMode = 'GrowAndShrink'
+$panelBottom.MinimumSize = New-Object System.Drawing.Size(0, 50)
 
 $flowBottom = New-Object System.Windows.Forms.FlowLayoutPanel
-$flowBottom.Dock = 'Fill'
+$flowBottom.Dock = 'Top'
+$flowBottom.AutoSize = $true
+$flowBottom.AutoSizeMode = 'GrowAndShrink'
+$flowBottom.MinimumSize = New-Object System.Drawing.Size(0, 46)
 $flowBottom.FlowDirection = 'LeftToRight'
-$flowBottom.WrapContents = $false
-$flowBottom.Padding = New-Object System.Windows.Forms.Padding(10, 12, 10, 8)
+$flowBottom.WrapContents = $true
+$flowBottom.Padding = New-Object System.Windows.Forms.Padding(10, 8, 10, 6)
 $panelBottom.Controls.Add($flowBottom)
 
 $btnSavePreview = New-Object System.Windows.Forms.Button
@@ -665,28 +774,34 @@ $btnUninstall.Size = New-Object System.Drawing.Size(140, 38)
 $flowBottom.Controls.Add($btnUninstall)
 
 $linkLog = New-Object System.Windows.Forms.LinkLabel
-$linkLog.Text = '查看日志'
+$linkLog.Text = '日志'
 $linkLog.AutoSize = $true
-$linkLog.Margin = New-Object System.Windows.Forms.Padding(14, 12, 3, 3)
+$linkLog.Margin = New-Object System.Windows.Forms.Padding(10, 12, 3, 3)
 $flowBottom.Controls.Add($linkLog)
 
 $linkDiag = New-Object System.Windows.Forms.LinkLabel
 $linkDiag.Text = '诊断'
 $linkDiag.AutoSize = $true
-$linkDiag.Margin = New-Object System.Windows.Forms.Padding(14, 12, 3, 3)
+$linkDiag.Margin = New-Object System.Windows.Forms.Padding(10, 12, 3, 3)
 $flowBottom.Controls.Add($linkDiag)
 
 $linkClean = New-Object System.Windows.Forms.LinkLabel
 $linkClean.Text = '清理'
 $linkClean.AutoSize = $true
-$linkClean.Margin = New-Object System.Windows.Forms.Padding(14, 12, 3, 3)
+$linkClean.Margin = New-Object System.Windows.Forms.Padding(10, 12, 3, 3)
 $flowBottom.Controls.Add($linkClean)
 
 $linkSwap = New-Object System.Windows.Forms.LinkLabel
-$linkSwap.Text = '临时换图（免安装）'
+$linkSwap.Text = '临时换图'
 $linkSwap.AutoSize = $true
-$linkSwap.Margin = New-Object System.Windows.Forms.Padding(14, 12, 3, 3)
+$linkSwap.Margin = New-Object System.Windows.Forms.Padding(10, 12, 3, 3)
 $flowBottom.Controls.Add($linkSwap)
+
+$linkHelp = New-Object System.Windows.Forms.LinkLabel
+$linkHelp.Text = '说明'
+$linkHelp.AutoSize = $true
+$linkHelp.Margin = New-Object System.Windows.Forms.Padding(10, 12, 3, 3)
+$flowBottom.Controls.Add($linkHelp)
 $script:PanelBottom = $panelBottom
 
 # ---- 中间：可滚动区 ----
@@ -758,11 +873,20 @@ $chkOverride.Margin = New-Object System.Windows.Forms.Padding(3, 2, 3, 6)
 $table.Controls.Add($chkOverride)
 $table.SetColumnSpan($chkOverride, 2)
 
-$table.Controls.Add((New-AuraRowLabel '素材来源'))
+$table.Controls.Add((New-AuraRowLabel '素材来源（右下角文案）'))
 $txtSource = New-Object System.Windows.Forms.TextBox
 $txtSource.Anchor = 'Left,Right'
 $txtSource.Margin = New-Object System.Windows.Forms.Padding(3, 4, 3, 4)
 $table.Controls.Add($txtSource)
+
+# ★ 用户实测把文件夹路径填进了「素材来源」。这里就地提醒，别等看到屏保才发现。
+$lblSourceWarn = New-Object System.Windows.Forms.Label
+$lblSourceWarn.AutoSize = $true
+$lblSourceWarn.ForeColor = [System.Drawing.Color]::Firebrick
+$lblSourceWarn.Margin = New-Object System.Windows.Forms.Padding(3, 0, 3, 2)
+$lblSourceWarn.Visible = $false
+$table.Controls.Add($lblSourceWarn)
+$table.SetColumnSpan($lblSourceWarn, 2)
 
 $table.Controls.Add((New-AuraRowLabel '切换间隔（秒）'))
 $numInterval = New-Object System.Windows.Forms.NumericUpDown
@@ -865,16 +989,63 @@ $transPanel.Margin = New-Object System.Windows.Forms.Padding(0)
 
 $txtTrans = New-Object System.Windows.Forms.TextBox
 $txtTrans.Width = 130
-$txtTrans.Margin = New-Object System.Windows.Forms.Padding(3, 4, 10, 4)
+$txtTrans.Margin = New-Object System.Windows.Forms.Padding(3, 4, 8, 4)
 $transPanel.Controls.Add($txtTrans)
 
+$btnTransRandom = New-Object System.Windows.Forms.Button
+$btnTransRandom.Text = '随机生成'
+$btnTransRandom.AutoSize = $true
+$btnTransRandom.Margin = New-Object System.Windows.Forms.Padding(0, 2, 6, 2)
+$transPanel.Controls.Add($btnTransRandom)
+
+$btnTransClear = New-Object System.Windows.Forms.Button
+$btnTransClear.Text = '清空'
+$btnTransClear.AutoSize = $true
+$btnTransClear.Margin = New-Object System.Windows.Forms.Padding(0, 2, 0, 2)
+$transPanel.Controls.Add($btnTransClear)
+$table.Controls.Add($transPanel)
+
+# ★ 提示文字单独占一整行并跨两列。
+#   之前它和输入框挤在第 1 列（宽度 = 100% 减去第一列标签宽），必然溢出被截断。
 $lblTransHint = New-Object System.Windows.Forms.Label
 $lblTransHint.AutoSize = $true
 $lblTransHint.ForeColor = [System.Drawing.Color]::DimGray
-$lblTransHint.Margin = New-Object System.Windows.Forms.Padding(0, 8, 0, 0)
-$lblTransHint.Text = '每张图的切换动画编号 0-6。留空 = 每次随机。例: 0,3,6'
-$transPanel.Controls.Add($lblTransHint)
-$table.Controls.Add($transPanel)
+$lblTransHint.Margin = New-Object System.Windows.Forms.Padding(3, 0, 3, 4)
+$lblTransHint.Text = '切换动画编号 0-6（共 7 种）。留空 = 每次随机；填 1 个 = 全部相同；填满 N 个 = 逐图对应'
+$table.Controls.Add($lblTransHint)
+$table.SetColumnSpan($lblTransHint, 2)
+
+# ---------------------------------------------------------------------------
+# 字段说明：悬停提示 + 「说明」窗
+#   界面要保持简洁，所以说明不写在界面上，按需出现。
+# ---------------------------------------------------------------------------
+$toolTip = New-Object System.Windows.Forms.ToolTip
+$toolTip.AutoPopDelay = 30000
+$toolTip.InitialDelay = 250
+$toolTip.ReshowDelay = 100
+
+$toolTip.SetToolTip($chkEnabled, '屏保总开关。' + $script:NL + '关闭后集控再下发也不会弹屏保。' + $script:NL + '（手动「预览」不受它限制，方便看效果）')
+$toolTip.SetToolTip($chkLock, '关闭屏保窗口时是否顺带锁屏。' + $script:NL + '建议不勾：希沃官方此处调用了自己不存在的 startLock()，本工具默认切断这条级联。')
+$toolTip.SetToolTip($chkOverride, '打开后才使用下面这些自定义设置；' + $script:NL + '不打开就完全沿用集控下发的图片和文案。')
+$toolTip.SetToolTip($txtSource, '屏保右下角显示的那行小字，例如「素材来自 XX」。' + $script:NL + '★ 这里填的是展示文案，不是图片路径。')
+$toolTip.SetToolTip($numInterval, '每张图片停留多少秒。' + $script:NL + '渲染器内部会 ×1000 转成毫秒。')
+$toolTip.SetToolTip($flowFit, '图片比例与屏幕不一致时怎么办：' + $script:NL + '留边完整显示 = 不裁剪，两侧留黑边；' + $script:NL + '裁剪铺满 = 填满全屏，但会裁掉超出部分。')
+$toolTip.SetToolTip($imgPanel, '要轮播的图片，每行一个路径。' + $script:NL + '用「选择文件夹…」可一次加入整个文件夹里的图片。')
+$toolTip.SetToolTip($txtTexts, '屏保上显示的正文文字，每行一条。' + $script:NL + '格式：内容|出处（出处可省略）。')
+$toolTip.SetToolTip($transPanel, '每张图的切换动画编号（0-6 共 7 种）。' + $script:NL + '留空 = 每次随机；填 1 个 = 全部相同；填满 N 个 = 逐图对应。')
+
+# 素材来源：值看起来像路径时就地告警
+$txtSource.add_TextChanged({
+    try {
+        $v = $txtSource.Text.Trim()
+        if ($v -ne '' -and ($v -match '[\\/]' -or $v -match '^[A-Za-z]:')) {
+            $lblSourceWarn.Text = '⚠ 这看起来是路径；此处应填展示文案（屏保右下角显示的那行字）'
+            $lblSourceWarn.Visible = $true
+        } else {
+            $lblSourceWarn.Visible = $false
+        }
+    } catch { }
+})
 
 # 顶部 / 底部 / 填充 的添加顺序（Fill 最后加，避免盖住其它面板）
 # ---- 根布局：三行表格（顶部自适应 / 中间填充 / 底部固定）----
@@ -886,7 +1057,7 @@ $root.ColumnCount = 1
 $root.RowCount = 3
 [void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
 [void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
-[void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 66)))
+[void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
 $form.Controls.Add($root)
 $root.Controls.Add($panelTop, 0, 0)
 $root.Controls.Add($panelMain, 0, 1)
@@ -900,6 +1071,62 @@ $form.add_Resize({
 # 图片选择与预览
 #   用 Windows 标准对话框（FolderBrowserDialog / OpenFileDialog）取路径，
 #   不要把路径手打 —— 手打容易出错，且中文/空格路径难处理。
+# ---------------------------------------------------------------------------
+# 转场效果解析
+#   三种输入都合法：
+#     留空      -> 空数组（渲染器每次随机）
+#     1 个值    -> 应用到全部图片
+#     N 个值    -> 逐图对应（N = 图片数）
+#   其它数量或越界值 -> 抛出说明「该怎么填」的错误
+#
+#   ★ 抽成独立函数是为了可测：这段规则曾出现自相矛盾的提示
+#     （填 1 个值报「数量必须等于图片数」，填越界值又报「必须是 0-6」），
+#     放在 Build-Config 里读 WinForms 控件就没法单测。
+# ---------------------------------------------------------------------------
+
+function ConvertTo-TransitionList {
+    param(
+        [string]$Raw,
+        [int]$ImageCount
+    )
+
+    $trans = @()
+    $text = ''
+    if ($null -ne $Raw) { $text = ([string]$Raw).Trim() }
+    if ($text -eq '') { return ,$trans }
+
+    $parts = @()
+    # 分隔符兼容半角与全角：, ; 空格  以及 ， ； 、
+    foreach ($p in ($text -split '[,;，；、\s]+')) { if ($p -ne '') { $parts += $p } }
+    if ($parts.Count -eq 0) { return ,$trans }
+
+    $nums = @()
+    for ($ti = 0; $ti -lt $parts.Count; $ti++) {
+        $v = 0
+        if (-not [int]::TryParse($parts[$ti], [ref]$v)) {
+            throw ('转场第 ' + ($ti + 1) + ' 个值「' + $parts[$ti] + '」不是整数。' + [Environment]::NewLine +
+                '转场是每张图的切换动画编号，只能填 0-6 的整数。')
+        }
+        if ($v -lt 0 -or $v -gt 6) {
+            throw ('转场第 ' + ($ti + 1) + ' 个值「' + $parts[$ti] + '」超出范围。' + [Environment]::NewLine +
+                '转场编号只能是 0、1、2、3、4、5、6（共 7 种切换动画）。')
+        }
+        $nums += $v
+    }
+
+    if ($nums.Count -eq 1) {
+        for ($i = 0; $i -lt $ImageCount; $i++) { $trans += $nums[0] }
+        return ,$trans
+    }
+    if ($nums.Count -eq $ImageCount) { return ,$nums }
+
+    throw ('转场填了 ' + $nums.Count + ' 个值，但图片有 ' + $ImageCount + ' 张。' + [Environment]::NewLine +
+        '请三选一：' + [Environment]::NewLine +
+        '  ① 只填 1 个值 —— 应用到全部图片' + [Environment]::NewLine +
+        '  ② 填满 ' + $ImageCount + ' 个值 —— 逐图对应' + [Environment]::NewLine +
+        '  ③ 留空 —— 每次切换随机')
+}
+
 # ---------------------------------------------------------------------------
 
 function Get-ImageFilesInFolder {
@@ -1105,22 +1332,8 @@ function Collect-Override {
         if ($item.content -ne '') { $texts += $item }
     }
 
-    $trans = @()
-    $transRaw = $txtTrans.Text.Trim()
-    if ($transRaw -ne '') {
-        foreach ($p in ($transRaw -split '[,;\s]+')) {
-            if ($p -eq '') { continue }
-            $n = 0
-            if ([int]::TryParse($p, [ref]$n)) {
-                if ($n -lt 0 -or $n -gt 6) { throw ('转场值必须是 0-6 的整数，发现：' + $p) }
-                $trans += $n
-            } else { throw ('转场值必须是整数，发现：' + $p) }
-        }
-        if ($trans.Count -ne $images.Count) {
-            throw ('转场数量（' + $trans.Count + '）必须等于图片数量（' + $images.Count + '）')
-        }
-    }
-
+    # 转场效果解析（规则见 ConvertTo-TransitionList，含单测）
+    $trans = ConvertTo-TransitionList -Raw $txtTrans.Text -ImageCount $images.Count
     $psType = 0
     if ($rbCover.Checked) { $psType = 1 }
 
@@ -1175,6 +1388,7 @@ function Refresh-UiState {
         $linkDiag.Visible = $true
         $linkClean.Visible = $true
         $linkSwap.Visible = $true
+        $linkHelp.Visible = $true
         if ($script:PanelBottom) { $script:PanelBottom.Visible = $true }
 
         if (-not $script:FormLoaded) {
@@ -1216,6 +1430,7 @@ function Refresh-UiState {
         #   方便对比装之前 / 装之后的状态。
         $linkLog.Visible = $true
         $linkDiag.Visible = $true
+        $linkHelp.Visible = $true
         if ($script:PanelBottom) { $script:PanelBottom.Visible = $true }
 
         if (-not $st.AsarExists) {
@@ -2257,6 +2472,27 @@ $linkDiag.add_Click({ Show-DiagnosticDialog })
 $linkClean.add_Click({ Invoke-CleanupDialog })
 $linkSwap.add_Click({ Show-ImageSwapDialog })
 
+# 转场：按当前图片数随机生成 N 个编号（想固定效果又不想手填时用）
+$btnTransRandom.add_Click({
+    try {
+        $n = 0
+        if ($txtImages.Text.Trim() -ne '') {
+            $n = @($txtImages.Text -split "\r?\n" | Where-Object { $_.Trim() -ne '' }).Count
+        }
+        if ($n -le 0) {
+            [System.Windows.Forms.MessageBox]::Show('先在「图片列表」里添加图片，再生成转场。', '还没有图片', 'OK', 'Information') | Out-Null
+            return
+        }
+        $vals = @()
+        for ($i = 0; $i -lt $n; $i++) { $vals += (Get-Random -Minimum 0 -Maximum 7) }
+        $txtTrans.Text = ($vals -join ', ')
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, '生成失败', 'OK', 'Warning') | Out-Null
+    }
+})
+$btnTransClear.add_Click({ $txtTrans.Text = '' })
+$linkHelp.add_Click({ Show-HelpDialog })
+
 $btnSavePreview.add_Click({
     try {
         $cfg = Build-Config
@@ -2266,10 +2502,11 @@ $btnSavePreview.add_Click({
         return
     }
 
+    # 勾了自定义图集但列表为空：不再阻断预览 ——
+    # 加载器会依次回落到「集控最后下发」「本机缓存的集控图」，仍能看到屏保效果。
+    # （这正是用户遇到的场景：override 为空就说没有可用预览数据）
     if ($chkOverride.Checked -and (@($cfg.override.imageList).Count -eq 0)) {
-        [System.Windows.Forms.MessageBox]::Show('已保存，但图片列表为空，无法预览。请至少添加一张图片。', '提示', 'OK', 'Warning') | Out-Null
-        Set-Status '已保存，但图片列表为空，预览已跳过。'
-        return
+        Add-Log '自定义图集为空，预览将回落到集控下发或本机缓存'
     }
 
     if ((Get-HostProcs).Count -eq 0) {
@@ -2297,14 +2534,23 @@ $btnSavePreview.add_Click({
     }
 
     if ($r.ok) {
-        $src = '当前配置'
-        if ($null -ne $r.source -and [string]$r.source -eq 'last-payload') { $src = '最近一次集控下发' }
+        $src = '自定义图集'
+        switch ([string]$r.source) {
+            'last-payload'      { $src = '最近一次集控下发' }
+            'cloud-picture'     { $src = '集控下发的图片缓存' }
+            'screen-saver-json' { $src = '本机缓存的集控屏保' }
+            'override'          { $src = '自定义图集' }
+        }
         $n = ''
         if ($null -ne $r.imageCount) { $n = '，图片 ' + $r.imageCount + ' 张' }
+        if ($null -ne $r.missingCount -and [int]$r.missingCount -gt 0) { $n += ('，其中 ' + $r.missingCount + ' 张路径不存在') }
         Set-Status ('屏保已唤起（来源：' + $src + $n + '）')
     } else {
         $msg = [string]$r.message
         if ($msg -eq '') { $msg = '原因：' + [string]$r.reason }
+        if ($null -ne $r.details -and @($r.details).Count -gt 0) {
+            $msg += $script:NL + $script:NL + '详情：' + $script:NL + (@($r.details) -join $script:NL)
+        }
         Set-Status ('预览失败：' + $msg)
         [System.Windows.Forms.MessageBox]::Show($msg, '预览失败', 'OK', 'Warning') | Out-Null
     }

@@ -134,6 +134,11 @@
     lockCascadeOnClose: false,
     // 图集覆盖；null = 不改写云端下发数据
     override: null,
+    // 预览时本地路径的形式：'raw' = 原样反斜杠路径（跟随官方形态）
+    //                     'file' = 转成 file:///D:/... 并做 URL 编码
+    // 实测依据：渲染器两项 bundle 里没有任何 file:// 拼接，且主动把反斜杠翻倍，
+    // 故默认 raw。若真机上 CSS url() 加载失败，改成 'file' 即可。
+    localUrlMode: 'raw',
     logLevel: 'info',
   };
 
@@ -205,11 +210,178 @@
     return out;
   }
 
+  /* ------------------------------------------------------------------ *
+   * 预览数据源辅助：集控下发的 picture[] / 本地 screen_saver.json
+   *   → 统一成渲染器要的 imageList（string[]）
+   *
+   * 实测依据（SeewoAbility.log 逐字）：集控下发的 screenSaverSetting 是
+   *   { data: { picture: [ {fileId, fileMd5, fileUrlType, imageUrl}, ... ] } }
+   * 里面**没有 imageList**。而本地 %APPDATA%\seewo\SeewoAbility\screen_saver.json
+   * 的 picture[] 是 md5 字符串，图片文件就在同目录下、文件名 === md5。
+   * 渲染器 screensaver.js 读的是 imageList 且必须是 string[]，
+   * 否则 e.imageList.map(...) 抛异常 —— 而它前一行已经渲染了 materialSource，
+   * 于是表现为「素材来源显示了、图片全黑」。这里就是把数据源对齐。
+   * ------------------------------------------------------------------ */
+
+  function getScreenSaverDir() {
+    try {
+      var path = require('path');
+      var base = process.env.APPDATA ||
+        (process.env.USERPROFILE ? path.join(process.env.USERPROFILE, 'AppData', 'Roaming') : null);
+      if (!base) return null;
+      return path.join(base, 'seewo', 'SeewoAbility', 'screen_saver');
+    } catch (e) { return null; }
+  }
+
+  /**
+   * 本地路径 → 渲染器可加载的形式。
+   *   raw  : 原样返回（交给渲染器的反斜杠翻倍逻辑，跟随官方形态）
+   *   file : file:///D:/a%20b/x.jpg（UNC 走 file://server/share）
+   * 已是 URL 的（http/file 等）一律不动。
+   */
+  function toLocalUrl(p, mode) {
+    if (typeof p !== 'string' || !p) return p;
+    if (mode !== 'file') return p;
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(p)) return p;
+    try {
+      var s2 = p.replace(/\\/g, '/');
+      if (/^\/\//.test(s2)) return 'file:' + encodeURI(s2);
+      if (/^[A-Za-z]:\//.test(s2)) return 'file:///' + encodeURI(s2);
+      return 'file:///' + encodeURI(s2.replace(/^\//, ''));
+    } catch (e) { return p; }
+  }
+
+  /**
+   * picture[] → 本地绝对路径数组。
+   * 元素可以是 string（md5 或已是绝对路径），也可以是 {fileMd5|md5|fileName|name}。
+   */
+  function mapPictureEntries(picture, dir) {
+    var res = [];
+    if (!Array.isArray(picture)) return res;
+    var path = null;
+    try { path = require('path'); } catch (e) { }
+    for (var i = 0; i < picture.length; i++) {
+      var e = picture[i], name = null;
+      if (typeof e === 'string') name = e;
+      else if (e && typeof e === 'object') name = e.fileMd5 || e.md5 || e.fileName || e.name || null;
+      if (!name || typeof name !== 'string') continue;
+      if (/^[A-Za-z]:[\\\/]/.test(name) || /^\\\\\\\\/.test(name)) { res.push(name); continue; }
+      if (!dir || !path) continue;
+      res.push(path.join(dir, name));
+    }
+    return res;
+  }
+
+  /**
+   * 读本机缓存的 screen_saver.json 作为**离线可用**的预览数据源。
+   * 这样即使用户没配 override、集控也还没下发过，也能预览到真实内容。
+   */
+  function readScreenSaverJson(log) {
+    try {
+      var fs2 = require('fs'), path2 = require('path');
+      var dir = getScreenSaverDir();
+      if (!dir) return null;
+      var file = path2.join(path2.dirname(dir), 'screen_saver.json');
+      if (!fs2.existsSync(file)) return null;
+      var j = JSON.parse(fs2.readFileSync(file, 'utf8'));
+      if (!j || typeof j !== 'object') return null;
+      var imgs = mapPictureEntries(j.picture, dir);
+      if (!imgs.length) return null;
+      var texts = [];
+      if (Array.isArray(j.text)) {
+        for (var i = 0; i < j.text.length; i++) {
+          var t = j.text[i];
+          if (typeof t === 'string' && t) texts.push({ content: t });
+          else if (t && typeof t === 'object' && t.content) {
+            var item = { content: String(t.content) };
+            if (t.provenance) item.provenance = String(t.provenance);
+            texts.push(item);
+          }
+        }
+      }
+      var si = Number(j.switchInterval);
+      if (!(isFinite(si) && si > 0)) si = 15;
+      return {
+        file: file, dir: dir,
+        data: {
+          imageList: imgs,
+          textList: texts,
+          materialSource: typeof j.materialSource === 'string' ? j.materialSource : '',
+          switchInterval: si,
+          pictureSizeType: (Number(j.pictureSizeType) === 1) ? 1 : 0
+        }
+      };
+    } catch (e) {
+      log.warn('读取 screen_saver.json 失败: ' + (e && e.message || e));
+      return null;
+    }
+  }
+
+  /**
+   * 发送前的硬校验。渲染器对 imageList 的要求是 string[]，
+   * 不满足时它会在渲染完 materialSource 之后抛异常 → 黑屏。
+   * 所以宁可不发，也要给出明确原因。
+   */
+  function validatePreviewPayload(data, log) {
+    var details = [];
+    if (!data || typeof data !== 'object') {
+      return { ok: false, reason: 'payload-invalid', message: '预览载荷不是对象', details: ['data 类型 = ' + (typeof data)] };
+    }
+    var imgs = data.imageList;
+    if (!Array.isArray(imgs)) {
+      var ty = (imgs === undefined) ? 'undefined' : (imgs === null ? 'null' : typeof imgs);
+      return {
+        ok: false, reason: 'payload-invalid',
+        message: '预览载荷里的 imageList 不是数组（实际是 ' + ty + '）。渲染器要求 string[]，否则会抛异常导致黑屏。',
+        details: details
+      };
+    }
+    if (!imgs.length) {
+      return { ok: false, reason: 'empty-image-list', message: '预览载荷里一张图片都没有。', details: details };
+    }
+    var bad = 0, missing = 0;
+    var fs3 = null;
+    try { fs3 = require('fs'); } catch (e) { }
+    for (var i = 0; i < imgs.length; i++) {
+      if (typeof imgs[i] !== 'string' || !imgs[i]) {
+        bad++;
+        if (details.length < 4) details.push('第 ' + (i + 1) + ' 项不是非空字符串（类型 ' + (typeof imgs[i]) + '）');
+        continue;
+      }
+      if (details.length < 4 && i < 3) details.push(imgs[i]);
+    }
+    if (bad > 0) {
+      return { ok: false, reason: 'payload-invalid', message: bad + ' 个图片路径不是字符串；渲染器要求 string[]。', details: details };
+    }
+    if (fs3) {
+      for (var j = 0; j < imgs.length; j++) {
+        var p = imgs[j];
+        if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(p)) continue;
+        try { if (!fs3.existsSync(p)) missing++; } catch (e) { }
+      }
+    }
+    if (details.length < 4) {
+      for (var k = 0; k < imgs.length && details.length < 4; k++) details.push(imgs[k]);
+    }
+    // ★ 文件存在性只作为**警告**，不作为硬失败：
+    //   类型契约（string[]）才是黑屏的根因，必须拦住；
+    //   而 existsSync 在跨盘符/符号链接/网络盘/权限受限时可能误判，
+    //   拿它阻断预览会制造假阴性。缺失数量回传给调用方展示。
+    return { ok: true, total: imgs.length, missing: missing, details: details };
+  }
   /**
    * 把 override 应用到云端下发的 data 上。
    * ★ 只在 override 提供了对应字段时才覆盖，未提供的字段保持官方原值。
    */
-  function applyOverride(data, override, log) {
+  /**
+   * 把 override 叠加到集控载荷上。
+   * mode: 'raw' | 'file' —— 决定最终 imageList 里本地路径的形式。
+   *   ★ 必须在这里归一化：本函数是「最终 imageList 长什么样」的唯一决策点。
+   *   渲染器的 wrapped onMessage 会再次调用 applyOverride，
+     若只在调用方转换，hook 重新叠加原始 override 时会把转换结果丢掉。
+   * toLocalUrl 对已是 URL 的值是恒等的，所以重复调用安全。
+   */
+  function applyOverride(data, override, log, mode) {
     if (!override || typeof override !== 'object') return data;
     if (!data || typeof data !== 'object') return data;
     var out = merge(data, override);
@@ -245,6 +417,12 @@
           return item;
         });
       } else { log.warn('textList 非法（必须是数组），已忽略'); out.textList = data.textList; }
+    }
+
+    // 统一把本地路径转成目标形式（file:/// 或原样）。
+    // 对已经是 URL 的值恒等，故幂等。
+    if (Array.isArray(out.imageList)) {
+      out.imageList = out.imageList.map(function (p) { return toLocalUrl(p, mode); });
     }
 
     return out;
@@ -308,7 +486,7 @@
           } catch (e) { }
           if (cfg.override) {
             try {
-              var data = applyOverride(msg.data, cfg.override, log);
+              var data = applyOverride(msg.data, cfg.override, log, (cfg.localUrlMode === 'file') ? 'file' : 'raw');
               forwarded = merge(msg, { data: data });
               controller.__auraLastPayload = data;
               state.overridden++;
@@ -516,24 +694,81 @@
    *   3) 都没有 → 返回错误（绝不能弹一个空白屏保让人以为坏了）
    */
   function buildPreviewPayload(cfg, controller, log) {
+    var mode = (cfg && cfg.localUrlMode === 'file') ? 'file' : 'raw';
+    var attempts = [];
+    var last = controller && controller.__auraLastPayload;
+
+    function finish(data, source, note) {
+      var out2 = data;
+      if (Array.isArray(out2.imageList)) {
+        out2.imageList = out2.imageList.map(function (p) { return toLocalUrl(p, mode); });
+      }
+      if (note) log.info(note);
+      return { data: out2, source: source };
+    }
+
+    // ① 用户在界面里配的自定义图集（最高优先级）
     var ov = cfg && cfg.override;
     if (ov && typeof ov === 'object') {
       var imgs = Array.isArray(ov.imageList)
         ? ov.imageList.filter(function (p) { return typeof p === 'string' && p.length > 0; })
         : [];
-      if (!imgs.length) {
-        return { error: '预览需要至少一张图片：请在界面里添加图片，或把 override 置空以使用集控下发数据', reason: 'empty-image-list' };
+      if (imgs.length) {
+        var base = { imageList: imgs, textList: [], materialSource: '', switchInterval: 15, pictureSizeType: 0 };
+        if (Array.isArray(ov.textList)) base.textList = ov.textList;
+        if (typeof ov.materialSource === 'string') base.materialSource = ov.materialSource;
+        if (typeof ov.switchInterval === 'number') base.switchInterval = ov.switchInterval;
+        if (typeof ov.pictureSizeType === 'number') base.pictureSizeType = ov.pictureSizeType;
+        return finish(applyOverride(base, ov, log, mode), 'override', '预览数据源：界面自定义图集（' + imgs.length + ' 张）');
       }
-      var base = { imageList: imgs, textList: [], materialSource: '', switchInterval: 15, pictureSizeType: 0 };
-      if (Array.isArray(ov.textList)) base.textList = ov.textList;
-      if (typeof ov.materialSource === 'string') base.materialSource = ov.materialSource;
-      if (typeof ov.switchInterval === 'number') base.switchInterval = ov.switchInterval;
-      if (typeof ov.pictureSizeType === 'number') base.pictureSizeType = ov.pictureSizeType;
-      return { data: applyOverride(base, ov, log), source: 'override' };
+      attempts.push('配置里勾选了自定义图集，但图片列表是空的');
+    } else {
+      attempts.push('配置里没有自定义图集（override 为空）');
     }
-    var last = controller && controller.__auraLastPayload;
-    if (last && typeof last === 'object') return { data: last, source: 'last-payload' };
-    return { error: '没有可用的预览数据：配置里 override 为空，且尚未收到集控下发', reason: 'no-payload' };
+
+    // ② 集控最后下发的载荷（已经是渲染器要的 imageList）
+    if (last && typeof last === 'object') {
+      if (Array.isArray(last.imageList) && last.imageList.length) {
+        var d2 = merge(last, {});
+        return finish(d2, 'last-payload', '预览数据源：集控最后下发的 imageList（' + last.imageList.length + ' 张）');
+      }
+      attempts.push('集控下发载荷里没有可用的 imageList');
+
+      // ③ 集控载荷是 picture[]（实测真实形态，没有 imageList）→ 映射到本地缓存文件
+      var mapped = mapPictureEntries(last.picture, getScreenSaverDir());
+      if (mapped.length) {
+        var si = Number(last.switchInterval);
+        if (!(isFinite(si) && si > 0)) si = 15;
+        var ps = (Number(last.pictureSizeType) === 1) ? 1 : 0;
+        return finish({
+          imageList: mapped,
+          textList: Array.isArray(last.textList) ? last.textList : [],
+          materialSource: typeof last.materialSource === 'string' ? last.materialSource : '',
+          switchInterval: si,
+          pictureSizeType: ps
+        }, 'cloud-picture', '预览数据源：集控 picture[] 映射到本地缓存（' + mapped.length + ' 张）');
+      }
+      attempts.push('集控载荷的 picture[] 没能映射出本地图片文件');
+    } else {
+      attempts.push('尚未收到任何集控下发');
+    }
+
+    // ④ 本机缓存的 screen_saver.json —— 离线也能预览（不需要 override、不需要等集控）
+    var ss = readScreenSaverJson(log);
+    if (ss) {
+      var d4 = merge(ss.data, {});
+      d4.imageList = ss.data.imageList.slice();
+      return finish(d4, 'screen-saver-json',
+        '预览数据源：本地缓存 ' + ss.file + '（' + d4.imageList.length + ' 张）');
+    }
+    attempts.push('本机 %APPDATA%\\seewo\\SeewoAbility\\screen_saver.json 不存在或没有图片');
+
+    return {
+      error: '没有可用的预览数据。' + attempts.join('；') + '。' +
+        '可在界面里勾选「使用自定义图集」并添加图片，或等集控下发一次。',
+      reason: 'no-payload',
+      attempts: attempts
+    };
   }
 
   /**
@@ -562,12 +797,28 @@
       var built = buildPreviewPayload(cfg, controller, log);
       if (built.error) return { ok: false, reason: built.reason, message: built.error };
 
+      // ★ 发送前硬校验：渲染器要求 imageList 是 string[]，
+      //   不满足时它会在渲染完 materialSource 之后抛异常 → 黑屏。
+      //   宁可不发，也要把原因说清楚。
+      var check = validatePreviewPayload(built.data, log);
+      if (!check.ok) {
+        log.error('预览载荷不合格，已中止: ' + check.message);
+        if (check.details && check.details.length) log.error('  详情: ' + check.details.join(' | '));
+        return { ok: false, reason: check.reason, message: check.message, details: check.details || [] };
+      }
+
+      var firstImg = built.data.imageList[0];
+      log.info('预览载荷: 来源=' + built.source + ' 图片=' + built.data.imageList.length + ' 张(缺失 ' + (check.missing || 0) + ')' +
+        ' materialSource="' + String(built.data.materialSource || '') + '" switchInterval=' + built.data.switchInterval + ' pictureSizeType=' + built.data.pictureSizeType);
+      log.info('路径形式对比（localUrlMode=' + ((cfg.localUrlMode === 'file') ? 'file' : 'raw') + '）: raw="' + firstImg + '" | file="' + toLocalUrl(firstImg, 'file') + '"');
+      if (check.missing) log.warn('有 ' + check.missing + ' 张图片文件不存在，屏保上会显示空白');
+
       var payload = built.data;
       state.previewBypass = true;
       try {
         controller.onMessage({ url: SCREENSAVER_ROUTE, data: payload });
         log.info('已触发屏保预览（来源=' + built.source + '，图片 ' + ((payload.imageList || []).length) + ' 张）');
-        return { ok: true, source: built.source, imageCount: (payload.imageList || []).length };
+        return { ok: true, source: built.source, imageCount: (payload.imageList || []).length, missingCount: (check.missing || 0) };
       } catch (e) {
         log.warn('预览调用 onMessage 失败，尝试手动兜底: ' + (e && e.message || e));
         try {

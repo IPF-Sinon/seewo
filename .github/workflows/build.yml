@@ -19,6 +19,10 @@ jobs:
         shell: pwsh
         run: ./tools/ps/Test-Syntax.ps1
 
+      - name: Unit tests (transition rules)
+        shell: pwsh
+        run: ./tools/ps/Test-Transition.ps1
+
   build-exe:
     needs: syntax-check
     runs-on: windows-latest
