@@ -226,3 +226,28 @@ test('窗口全屏且置顶（保证盖住桌面）', () => {
     assert.equal(o.webPreferences.nodeIntegration, false, '外部网页不应有 node 权限');
   } finally { env.cleanup(); }
 });
+test('★ 模式「不修改」：override 为空且网页关闭 → 原样放行官方屏保', () => {
+  const env = boot({
+    config: { screensaverEnabled: true, override: null, web: { enabled: false, url: '' } },
+  });
+  try {
+    const payload = { imageList: ['cloud-a.jpg', 'cloud-b.jpg'], materialSource: '屏保功能来源于希沃集控', switchInterval: 5 };
+    env.controller.onMessage({ url: ROUTE, data: payload });
+    assert.equal(env.created.length, 0, '不应创建网页窗口');
+    assert.equal(env.onMessageCalls.length, 1, '应当交给官方控制器');
+    // 不修改 = 载荷要原样传下去，一个字段都不能动
+    assert.deepEqual(env.onMessageCalls[0], { url: ROUTE, data: payload });
+  } finally { env.cleanup(); }
+});
+
+test('模式「自定义图集」：网页关闭时不该建网页窗口', () => {
+  const env = boot({
+    config: { screensaverEnabled: true, override: { imageList: ['mine.jpg'], textList: [] }, web: { enabled: false, url: 'https://example.com' } },
+  });
+  try {
+    env.controller.onMessage({ url: ROUTE, data: { imageList: ['cloud.jpg'] } });
+    assert.equal(env.created.length, 0, '即使填了网址，没选网页模式也不该建窗');
+    assert.equal(env.onMessageCalls.length, 1);
+    assert.deepEqual(env.onMessageCalls[0].data.imageList, ['mine.jpg'], '应当用自定义图集覆盖');
+  } finally { env.cleanup(); }
+});

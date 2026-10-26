@@ -46,7 +46,7 @@ $script:ResultPath  = Join-Path $script:ConfigDir 'command-result.json'
 $script:LogPath     = Join-Path $script:ConfigDir 'aura-screensaver.log'
 $script:Utf8NoBom   = New-Object System.Text.UTF8Encoding($false)
 $script:HostNames   = @('SeewoServiceAssistant')
-if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.6.0' }
+if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.7.0' }
 
 # ---------------------------------------------------------------------------
 # 管理员权限（写入 Program Files 必需）
@@ -932,20 +932,45 @@ $chkLock.Margin = New-Object System.Windows.Forms.Padding(3, 2, 3, 8)
 $table.Controls.Add($chkLock)
 $table.SetColumnSpan($chkLock, 2)
 
-$lblSection = New-AuraRowLabel '自定义图集'
+$lblSection = New-AuraRowLabel '屏保内容（三选一）'
 $lblSection.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9, [System.Drawing.FontStyle]::Bold)
 $lblSection.Margin = New-Object System.Windows.Forms.Padding(3, 10, 3, 4)
 $table.Controls.Add($lblSection)
 $table.SetColumnSpan($lblSection, 2)
 
-$chkOverride = New-Object System.Windows.Forms.CheckBox
-$chkOverride.Text = '使用自定义图集（不勾选 = 沿用集控下发的图片与文案）'
-$chkOverride.AutoSize = $true
-$chkOverride.Margin = New-Object System.Windows.Forms.Padding(3, 2, 3, 6)
-$table.Controls.Add($chkOverride)
-$table.SetColumnSpan($chkOverride, 2)
+# 三种模式互斥：选了哪种，下面就只显示哪种的选项。
+#   自定义图集 -> 用自己配的图片/文案
+#   网页屏保   -> 用网页当屏保（动画不受官方 7 种转场限制）
+#   不修改     -> 完全沿用集控下发的图片与文案
+$modePanel = New-Object System.Windows.Forms.FlowLayoutPanel
+$modePanel.AutoSize = $true
+$modePanel.WrapContents = $true
+$modePanel.Margin = New-Object System.Windows.Forms.Padding(3, 2, 3, 8)
 
-$table.Controls.Add((New-AuraRowLabel '素材来源（右下角文案）'))
+$rbModeImage = New-Object System.Windows.Forms.RadioButton
+$rbModeImage.Text = '自定义图集'
+$rbModeImage.AutoSize = $true
+$rbModeImage.Margin = New-Object System.Windows.Forms.Padding(0, 0, 20, 0)
+$modePanel.Controls.Add($rbModeImage)
+
+$rbModeWeb = New-Object System.Windows.Forms.RadioButton
+$rbModeWeb.Text = '网页屏保'
+$rbModeWeb.AutoSize = $true
+$rbModeWeb.Margin = New-Object System.Windows.Forms.Padding(0, 0, 20, 0)
+$modePanel.Controls.Add($rbModeWeb)
+
+$rbModeNone = New-Object System.Windows.Forms.RadioButton
+$rbModeNone.Text = '不修改（沿用集控下发）'
+$rbModeNone.AutoSize = $true
+$rbModeNone.Margin = New-Object System.Windows.Forms.Padding(0)
+$modePanel.Controls.Add($rbModeNone)
+$rbModeNone.Checked = $true
+
+$table.Controls.Add($modePanel)
+$table.SetColumnSpan($modePanel, 2)
+
+$lblR1 = New-AuraRowLabel '素材来源（右下角文案）'
+$table.Controls.Add($lblR1)
 $txtSource = New-Object System.Windows.Forms.TextBox
 $txtSource.Anchor = 'Left,Right'
 $txtSource.Margin = New-Object System.Windows.Forms.Padding(3, 4, 3, 4)
@@ -960,7 +985,8 @@ $lblSourceWarn.Visible = $false
 $table.Controls.Add($lblSourceWarn)
 $table.SetColumnSpan($lblSourceWarn, 2)
 
-$table.Controls.Add((New-AuraRowLabel '切换间隔（秒）'))
+$lblR2 = New-AuraRowLabel '切换间隔（秒）'
+$table.Controls.Add($lblR2)
 $numInterval = New-Object System.Windows.Forms.NumericUpDown
 $numInterval.Width = 90
 $numInterval.Minimum = 1
@@ -970,7 +996,8 @@ $numInterval.Anchor = 'Left'
 $numInterval.Margin = New-Object System.Windows.Forms.Padding(3, 4, 3, 4)
 $table.Controls.Add($numInterval)
 
-$table.Controls.Add((New-AuraRowLabel '图片适配'))
+$lblR3 = New-AuraRowLabel '图片适配'
+$table.Controls.Add($lblR3)
 $flowFit = New-Object System.Windows.Forms.FlowLayoutPanel
 $flowFit.AutoSize = $true
 $flowFit.WrapContents = $false
@@ -990,7 +1017,8 @@ $rbCover.AutoSize = $true
 $rbCover.Margin = New-Object System.Windows.Forms.Padding(3, 4, 3, 4)
 $flowFit.Controls.Add($rbCover)
 
-$table.Controls.Add((New-AuraRowLabel '图片列表'))
+$lblR4 = New-AuraRowLabel '图片列表'
+$table.Controls.Add($lblR4)
 $imgPanel = New-Object System.Windows.Forms.Panel
 $imgPanel.Anchor = 'Left,Right'
 $imgPanel.Height = 176
@@ -1043,7 +1071,8 @@ $imgPanel.Controls.Add($imgBar)
 $txtImages.BringToFront()
 $table.Controls.Add($imgPanel)
 
-$table.Controls.Add((New-AuraRowLabel '图文条目'))
+$lblR5 = New-AuraRowLabel '图文条目'
+$table.Controls.Add($lblR5)
 $txtTexts = New-Object System.Windows.Forms.TextBox
 $txtTexts.Multiline = $true
 $txtTexts.ScrollBars = 'Vertical'
@@ -1053,7 +1082,8 @@ $txtTexts.Anchor = 'Left,Right'
 $txtTexts.Margin = New-Object System.Windows.Forms.Padding(3, 4, 3, 4)
 $table.Controls.Add($txtTexts)
 
-$table.Controls.Add((New-AuraRowLabel '转场效果'))
+$lblR6 = New-AuraRowLabel '转场效果'
+$table.Controls.Add($lblR6)
 $transPanel = New-Object System.Windows.Forms.FlowLayoutPanel
 $transPanel.AutoSize = $true
 $transPanel.WrapContents = $false
@@ -1098,7 +1128,10 @@ $toolTip.ReshowDelay = 100
 
 $toolTip.SetToolTip($chkEnabled, '屏保总开关。' + $script:NL + '关闭后集控再下发也不会弹屏保。' + $script:NL + '（手动「预览」不受它限制，方便看效果）')
 $toolTip.SetToolTip($chkLock, '关闭屏保窗口时是否顺带锁屏。' + $script:NL + '建议不勾：希沃官方此处调用了自己不存在的 startLock()，本工具默认切断这条级联。')
-$toolTip.SetToolTip($chkOverride, '打开后才使用下面这些自定义设置；' + $script:NL + '不打开就完全沿用集控下发的图片和文案。')
+$toolTip.SetToolTip($modePanel, '三选一，决定屏保显示什么。' + $script:NL + '选中后下面只会显示该模式对应的选项。')
+$toolTip.SetToolTip($rbModeImage, '用你自己配的图片、文案与转场。' + $script:NL + '适合把屏保换成自己的图。')
+$toolTip.SetToolTip($rbModeWeb, '用网页当屏保，动画完全由网页决定。' + $script:NL + 'CSS 动画 / JS / 视频 / Canvas 都行，不受官方那 7 种转场限制。')
+$toolTip.SetToolTip($rbModeNone, '什么都不改，完全沿用集控下发的图片与文案。' + $script:NL + '想恢复官方行为时选这个。')
 $toolTip.SetToolTip($txtSource, '屏保右下角显示的那行小字，例如「素材来自 XX」。' + $script:NL + '★ 这里填的是展示文案，不是图片路径。')
 $toolTip.SetToolTip($numInterval, '每张图片停留多少秒。' + $script:NL + '渲染器内部会 ×1000 转成毫秒。')
 $toolTip.SetToolTip($flowFit, '图片比例与屏幕不一致时怎么办：' + $script:NL + '留边完整显示 = 不裁剪，两侧留黑边；' + $script:NL + '裁剪铺满 = 填满全屏，但会裁掉超出部分。')
@@ -1106,17 +1139,13 @@ $toolTip.SetToolTip($imgPanel, '要轮播的图片，每行一个路径。' + $s
 $toolTip.SetToolTip($txtTexts, '屏保上显示的正文文字，每行一条。' + $script:NL + '格式：内容|出处（出处可省略）。')
 $toolTip.SetToolTip($transPanel, '每张图的切换动画编号（0-6 共 7 种）。' + $script:NL + '留空 = 每次随机；填 1 个 = 全部相同；填满 N 个 = 逐图对应。')
 
-$table.Controls.Add((New-AuraRowLabel '网页屏保'))
+$lblR7 = New-AuraRowLabel '网页屏保'
+$table.Controls.Add($lblR7)
 $webPanel = New-Object System.Windows.Forms.FlowLayoutPanel
 $webPanel.AutoSize = $true
 $webPanel.WrapContents = $true
 $webPanel.Margin = New-Object System.Windows.Forms.Padding(0)
 
-$chkWeb = New-Object System.Windows.Forms.CheckBox
-$chkWeb.Text = '用网页当屏保'
-$chkWeb.AutoSize = $true
-$chkWeb.Margin = New-Object System.Windows.Forms.Padding(3, 4, 12, 4)
-$webPanel.Controls.Add($chkWeb)
 
 $btnWebNow = New-Object System.Windows.Forms.Button
 $btnWebNow.Text = '立即显示'
@@ -1139,7 +1168,8 @@ $lblWebHint.Text = '勾选后，屏保改由网页显示 —— 网页里怎么�
 $table.Controls.Add($lblWebHint)
 $table.SetColumnSpan($lblWebHint, 2)
 
-$table.Controls.Add((New-AuraRowLabel '网页地址'))
+$lblR8 = New-AuraRowLabel '网页地址'
+$table.Controls.Add($lblR8)
 $txtWebUrl = New-Object System.Windows.Forms.TextBox
 $txtWebUrl.Anchor = 'Left,Right'
 $txtWebUrl.Margin = New-Object System.Windows.Forms.Padding(3, 4, 3, 4)
@@ -1361,19 +1391,28 @@ function Set-Status {
     [System.Windows.Forms.Application]::DoEvents()
 }
 
-function Enable-OverrideFields {
-    $on = $chkOverride.Checked
-    $txtSource.Enabled = $on
-    $numInterval.Enabled = $on
-    $rbContain.Enabled = $on
-    $rbCover.Enabled = $on
-    $txtImages.Enabled = $on
-    $txtTexts.Enabled = $on
-    $txtTrans.Enabled = $on
-    $chkWeb.Enabled = $on
-    $txtWebUrl.Enabled = $on
-    $btnWebNow.Enabled = $on
-    $btnWebClose.Enabled = $on
+# 三选一模式对应的两组成员控件
+$script:ImgRowCtrls = @($lblR1, $txtSource, $lblSourceWarn, $lblR2, $numInterval,
+    $lblR3, $flowFit, $lblR4, $imgPanel, $lblR5, $txtTexts, $lblR6, $transPanel, $lblTransHint)
+$script:WebRowCtrls = @($lblR7, $webPanel, $lblWebHint, $lblR8, $txtWebUrl)
+
+# 按当前模式显示/隐藏对应选项，并同步可用状态
+function Update-ModeVisibility {
+    $img = $rbModeImage.Checked
+    $web = $rbModeWeb.Checked
+    foreach ($c in $script:ImgRowCtrls) { if ($null -ne $c) { $c.Visible = $img } }
+    foreach ($c in $script:WebRowCtrls) { if ($null -ne $c) { $c.Visible = $web } }
+
+    $txtSource.Enabled = $img
+    $numInterval.Enabled = $img
+    $rbContain.Enabled = $img
+    $rbCover.Enabled = $img
+    $txtImages.Enabled = $img
+    $txtTexts.Enabled = $img
+    $txtTrans.Enabled = $img
+    $txtWebUrl.Enabled = $web
+    $btnWebNow.Enabled = $web
+    $btnWebClose.Enabled = $web
 }
 
 function Fill-Form {
@@ -1383,10 +1422,13 @@ function Fill-Form {
 
     $ov = $null
     if ($null -ne $Cfg.override) { $ov = $Cfg.override }
-    $chkOverride.Checked = ($null -ne $ov)
 
-    # 网页屏保
-    $chkWeb.Checked = ($null -ne $Cfg.web -and $Cfg.web.enabled -eq $true)
+    # 模式：网页 > 自定义图集 > 不修改（网页优先，避免两者都开着时语义不清）
+    $isWeb = ($null -ne $Cfg.web -and $Cfg.web.enabled -eq $true)
+    $rbModeWeb.Checked = $isWeb
+    $rbModeImage.Checked = ((-not $isWeb) -and ($null -ne $ov))
+    $rbModeNone.Checked = ((-not $isWeb) -and ($null -eq $ov))
+
     if ($null -ne $Cfg.web -and $null -ne $Cfg.web.url) { $txtWebUrl.Text = [string]$Cfg.web.url } else { $txtWebUrl.Text = '' }
 
     if ($null -ne $ov) {
@@ -1432,7 +1474,7 @@ function Fill-Form {
         $txtTexts.Text = ''
         $txtTrans.Text = ''
     }
-    Enable-OverrideFields
+    Update-ModeVisibility
 }
 
 function Collect-Override {
@@ -1473,13 +1515,13 @@ function Collect-Override {
 
 function Build-Config {
     $ov = $null
-    if ($chkOverride.Checked) { $ov = Collect-Override }
+    if ($rbModeImage.Checked) { $ov = Collect-Override }
     return [pscustomobject]@{
         screensaverEnabled = [bool]$chkEnabled.Checked
         lockCascadeOnClose = [bool]$chkLock.Checked
         allowManualClose = $true
         override = $ov
-        web = [pscustomobject]@{ enabled = [bool]$chkWeb.Checked; url = $txtWebUrl.Text.Trim(); closeOnClick = $false }
+        web = [pscustomobject]@{ enabled = [bool]$rbModeWeb.Checked; url = $txtWebUrl.Text.Trim(); closeOnClick = $false }
         logLevel = 'info'
         backupCount = 3
     }
@@ -2818,7 +2860,11 @@ $btnUninstall.add_Click({
 # 其他
 # ---------------------------------------------------------------------------
 
-$chkOverride.add_CheckedChanged({ Enable-OverrideFields })
+# 三选一：切换时立即显示/隐藏对应选项
+foreach ($rb in @($rbModeImage, $rbModeWeb, $rbModeNone)) {
+    $rb.add_CheckedChanged({ Update-ModeVisibility })
+}
+Update-ModeVisibility
 
 $linkLog.add_Click({
     if (Test-Path -LiteralPath $script:LogPath) {
