@@ -46,7 +46,7 @@ $script:ResultPath  = Join-Path $script:ConfigDir 'command-result.json'
 $script:LogPath     = Join-Path $script:ConfigDir 'aura-screensaver.log'
 $script:Utf8NoBom   = New-Object System.Text.UTF8Encoding($false)
 $script:HostNames   = @('SeewoServiceAssistant')
-if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.7.0' }
+if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.8.0' }
 
 # ---------------------------------------------------------------------------
 # 管理员权限（写入 Program Files 必需）

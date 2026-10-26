@@ -716,29 +716,54 @@
     if (/^[A-Za-z]:[\\\/]/.test(v) || /^\\\\\\\\/.test(v)) {
       try { return 'file:///' + encodeURI(v.replace(/\\/g, '/')); } catch (e) { return v; }
     }
+    // POSIX 绝对路径与 //server/share 写法（便携场景/测试环境）
+    if (/^\/\//.test(v)) { try { return 'file:' + encodeURI(v); } catch (e) { return v; } }
+    if (/^\//.test(v)) { try { return 'file://' + encodeURI(v); } catch (e) { return v; } }
     return v;
   }
 
   function closeWebWindow(state, log) {
     try {
+      // 先解绑全局快捷键，避免屏保关掉后 ESC 还被我们占着
+      if (state && state.webShortcut) {
+        try { state.webShortcut.unregister('Escape'); } catch (e) { }
+        try { state.webShortcut.unregister('CommandOrControl+Alt+Q'); } catch (e) { }
+        state.webShortcut = null;
+      }
       if (state && state.webWin) {
         try { if (!state.webWin.isDestroyed()) state.webWin.close(); } catch (e) { }
         state.webWin = null;
         log.info('网页屏保已关闭');
       }
-      return { ok: true };
+      return { ok: true, lastError: (state && state.webLastError) || null };
     } catch (e) { return { ok: true }; }
   }
 
   function showWebWindow(url, cfg, log, state) {
     var target = normalizeWebUrl(url);
     if (!target) return { ok: false, reason: 'empty-url', message: '没有填网页地址或本地 HTML 路径' };
+
+    // 本地文件先校验：坏路径直接报错，不要开出全屏黑窗口
+    if (/^file:\/\//i.test(target)) {
+      try {
+        var fsx = require('fs');
+        var raw = decodeURI(target.replace(/^file:\/\//i, ''));
+        // 只有 Windows 盘符路径才把 / 还原成 \\；POSIX 路径保持原样
+        if (/^[A-Za-z]:/.test(raw)) { raw = raw.replace(/\//g, '\\'); }
+        if (!fsx.existsSync(raw)) {
+          return { ok: false, reason: 'file-not-found', message: '这个文件不存在：' + raw };
+        }
+        if (fsx.statSync(raw).isDirectory()) {
+          return { ok: false, reason: 'is-directory', message: '这是文件夹，不是网页文件：' + raw + '（请选到具体的 .html 文件）' };
+        }
+      } catch (e) { }
+    }
+
     try {
       var el = getElectronModule();
       var BW = el && el.BrowserWindow;
       if (!BW) return { ok: false, reason: 'no-browserwindow', message: '拿不到 Electron BrowserWindow，无法显示网页' };
 
-      // 已经开着就只换地址
       if (state.webWin && !state.webWin.isDestroyed()) {
         state.webWin.loadURL(target);
         log.info('网页屏保已切换地址: ' + target);
@@ -759,16 +784,56 @@
 
       var w = new BW(opt);
       state.webWin = w;
+      state.webLastError = null;
       try { w.setAlwaysOnTop(true, 'screen-saver'); } catch (e) { }
       try { w.setMenuBarVisibility(false); } catch (e) { }
 
-      // ★ ESC 必须能关：全屏网页若没留出口，用户会被困住
+      // ★ 加载失败立刻关掉。
+      //   用户实测：填了网页后预览 → 全屏黑屏 → 什么都操作不了。
+      //   黑屏本身不致命，致命的是「没有出口」。
+      try {
+        w.webContents.on('did-fail-load', function (ev, code, desc, validatedURL) {
+          try {
+            state.webLastError = code + ' ' + desc;
+            log.error('网页加载失败(' + code + ' ' + desc + '): ' + validatedURL + ' —— 已自动关闭，避免卡在黑屏');
+            closeWebWindow(state, log);
+          } catch (e) { }
+        });
+      } catch (e) { }
+
+      // ★ 加载超时保护：20 秒还没渲染出来就关掉（网络卡住时也一样有出口）
+      var loaded = false;
+      try { w.webContents.on('did-finish-load', function () { loaded = true; }); } catch (e) { }
+      try {
+        var t = setTimeout(function () {
+          try {
+            if (!loaded && state.webWin === w) {
+              log.warn('网页 20 秒内没有加载完成，自动关闭以免卡在黑屏');
+              state.webLastError = 'load-timeout';
+              closeWebWindow(state, log);
+            }
+          } catch (e) { }
+        }, 20000);
+        if (t && typeof t.unref === 'function') t.unref();
+      } catch (e) { }
+
+      // 窗口有焦点时的 ESC
       try {
         w.webContents.on('before-input-event', function (ev, input) {
           try {
             if (input && (input.key === 'Escape' || input.keyCode === 'Escape')) closeWebWindow(state, log);
           } catch (e) { }
         });
+      } catch (e) { }
+
+      // ★ 全局快捷键：不依赖窗口焦点 —— 这是「什么都操作不了」的兜底出口
+      try {
+        var gs = el.globalShortcut;
+        if (gs) {
+          try { gs.register('Escape', function () { closeWebWindow(state, log); }); } catch (e) { }
+          try { gs.register('CommandOrControl+Alt+Q', function () { closeWebWindow(state, log); }); } catch (e) { }
+          state.webShortcut = gs;
+        }
       } catch (e) { }
 
       // 可选：点一下鼠标就关（默认关，避免误触）
@@ -783,6 +848,18 @@
       try { w.on('closed', function () { state.webWin = null; }); } catch (e) { }
 
       w.loadURL(target);
+      try { w.focus(); } catch (e) { }
+
+      // 角标提示怎么退出，几秒后淡出（否则用户根本不知道按哪个键）
+      try {
+        w.webContents.once('did-finish-load', function () {
+          try {
+            w.webContents.insertCSS('#__aura_exit_hint{position:fixed;right:16px;bottom:16px;z-index:2147483647;background:rgba(0,0,0,.55);color:#fff;font:13px/1.6 "Microsoft YaHei UI",sans-serif;padding:6px 12px;border-radius:6px;pointer-events:none}');
+            w.webContents.executeJavaScript("(function(){try{if(document.getElementById('__aura_exit_hint'))return;var d=document.createElement('div');d.id='__aura_exit_hint';d.textContent='按 ESC 退出屏保';document.documentElement.appendChild(d);setTimeout(function(){try{d.style.transition='opacity 1s';d.style.opacity='0';setTimeout(function(){try{d.remove()}catch(e){}},1200)}catch(e){}},5000)}catch(e){}})()");
+          } catch (e) { }
+        });
+      } catch (e) { }
+
       log.info('网页屏保已显示: ' + target);
       return { ok: true, url: target };
     } catch (e) {
@@ -1050,6 +1127,21 @@
       if (!cmdFile || !resFile) { log.warn('命令桥：无法解析数据目录，预览按钮将不可用'); return false; }
 
       var lastSeq = 0;
+      var bridgeStartMs = Date.now();
+
+      // ★ 启动时清掉上一次会话遗留的命令文件。
+      //   否则每次重启都会把「上次点过的命令」再执行一遍：
+      //   实测证据（SeewoServiceAssistant_20261026.log）：
+      //     06:41:34.940 程序启动
+      //     06:41:36.313 SCREENSAVER指令入队   <- 1.4 秒后，且日志里没有任何用户操作
+      //   原因就是 lastSeq 每次启动都从 0 开始，而 command.json 还留在磁盘上。
+      try {
+        if (fs.existsSync(cmdFile)) {
+          fs.unlinkSync(cmdFile);
+          log.info('已清理上次会话遗留的命令文件（避免开机重放旧命令）');
+        }
+      } catch (e) { log.warn('清理遗留命令文件失败: ' + (e && e.message || e)); }
+
       var timer = setInterval(function () {
         try {
           if (!fs.existsSync(cmdFile)) return;
@@ -1058,6 +1150,16 @@
           var seq = Number(cmd.seq) || 0;
           if (seq <= lastSeq) return;
           lastSeq = seq;
+
+          // 双保险：命令时间早于本进程启动时间的一律忽略（跨会话的旧命令）
+          if (cmd.at) {
+            var atMs = Date.parse(cmd.at);
+            if (isFinite(atMs) && atMs < bridgeStartMs) {
+              log.info('忽略跨会话的旧命令: ' + cmd.cmd + '（' + cmd.at + '）');
+              try { fs.unlinkSync(cmdFile); } catch (e) { }
+              return;
+            }
+          }
 
           var name = String(cmd.cmd || '');
           var result;
@@ -1072,6 +1174,8 @@
           result.at = new Date().toISOString();
           try { fs.writeFileSync(resFile, JSON.stringify(result, null, 2)); }
           catch (e) { log.warn('写命令结果失败: ' + (e && e.message || e)); }
+          // 消费完就删：同一命令绝不能被下个会话重放
+          try { fs.unlinkSync(cmdFile); } catch (e) { }
         } catch (e) {
           // 半截 JSON / 权限问题都不该打断轮询
           if (e && e.code !== 'ENOENT') log.debug('命令桥轮询异常: ' + (e && e.message || e));

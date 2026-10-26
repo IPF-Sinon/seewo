@@ -36,6 +36,10 @@ function boot(opts) {
   delete process.env.AURA_SCREENSAVER_CONFIG;
   delete process.env.USERPROFILE;
 
+  if (opts.preCommand) {
+    fs.writeFileSync(path.join(dataDir, 'command.json'), JSON.stringify(opts.preCommand), 'utf8');
+  }
+
   if (opts.config) {
     fs.writeFileSync(path.join(dataDir, 'config.json'), JSON.stringify(opts.config), 'utf8');
   }
@@ -60,6 +64,12 @@ function boot(opts) {
     return w;
   }
 
+  const globalShortcut = {
+    _reg: {},
+    register(acc, cb) { this._reg[acc] = cb; },
+    unregister(acc) { delete this._reg[acc]; },
+  };
+
   const onMessageCalls = [];
   const controller = {
     onMessage(msg) { onMessageCalls.push(msg); },
@@ -74,6 +84,7 @@ function boot(opts) {
       return {
         app: { isReady: () => true, once() {}, on() {} },
         BrowserWindow: FakeBrowserWindow,
+        globalShortcut: globalShortcut,
         screen: { getAllDisplays: () => [{ bounds: { x: 0, y: 0, width: 1920, height: 1080 } }] },
       };
     }
@@ -88,7 +99,7 @@ function boot(opts) {
   require(LOADER);
 
   return {
-    g: global.__AURA_SCREENSAVER__, controller, onMessageCalls, created, tmp, dataDir,
+    g: global.__AURA_SCREENSAVER__, controller, onMessageCalls, created, tmp, dataDir, globalShortcut,
     triggerRoute() { controller.__auraOriginalOnMessage({ url: ROUTE, data: { imageList: ['x.jpg'] } }); },
     cleanup() {
       delete global.__AURA_SCREENSAVER__;
@@ -140,7 +151,12 @@ test('勾了但地址为空：放行官方屏保（不劫持）', () => {
 test('showWeb 命令：本地 HTML 路径转成 file:/// 且中文做 URL 编码', () => {
   const env = boot({ config: { screensaverEnabled: false, web: { enabled: false, url: '' } } });
   try {
-    const winPath = 'D:\\动画\\展示 页.html';
+    // 新增了本地文件存在性校验，所以这里必须造一个真实文件
+    const dir = path.join(env.tmp, '动画');
+    fs.mkdirSync(dir, { recursive: true });
+    const real = path.join(dir, '展示 页.html');
+    fs.writeFileSync(real, '<html></html>');
+    const winPath = real;
     const r = env.g.control.showWeb({ url: winPath });
     assert.equal(r.ok, true, r.message);
     const u = env.created[0]._url;
@@ -249,5 +265,78 @@ test('模式「自定义图集」：网页关闭时不该建网页窗口', () =>
     assert.equal(env.created.length, 0, '即使填了网址，没选网页模式也不该建窗');
     assert.equal(env.onMessageCalls.length, 1);
     assert.deepEqual(env.onMessageCalls[0].data.imageList, ['mine.jpg'], '应当用自定义图集覆盖');
+  } finally { env.cleanup(); }
+});
+test('★ 本地文件不存在：报错且不建窗口（避免全屏黑屏）', () => {
+  const env = boot({ config: { screensaverEnabled: false, web: { enabled: false, url: '' } } });
+  try {
+    const r = env.g.control.showWeb({ url: 'D:' + String.fromCharCode(92) + 'nope' + String.fromCharCode(92) + 'missing.html' });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'file-not-found');
+    assert.equal(env.created.length, 0, '不该开出黑窗口');
+  } finally { env.cleanup(); }
+});
+
+test('★ 路径是文件夹：报错并提示选到具体文件', () => {
+  const env = boot({ config: { screensaverEnabled: false, web: { enabled: false, url: '' } } });
+  try {
+    const dir = path.join(env.tmp, 'somedir');
+    fs.mkdirSync(dir, { recursive: true });
+    const r = env.g.control.showWeb({ url: dir });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'is-directory');
+    assert.equal(env.created.length, 0);
+  } finally { env.cleanup(); }
+});
+
+test('★ 网页加载失败：自动关窗，绝不留黑屏', () => {
+  const env = boot({ config: { screensaverEnabled: false, web: { enabled: false, url: '' } } });
+  try {
+    env.g.control.showWeb({ url: 'http://definitely.invalid.example' });
+    const w = env.created[0];
+    assert.equal(w._destroyed, false);
+    w.webContents.emit('did-fail-load', {}, -105, 'NAME_NOT_RESOLVED', 'http://definitely.invalid.example');
+    assert.equal(w._destroyed, true, '加载失败必须自动关闭');
+  } finally { env.cleanup(); }
+});
+
+test('★ 全局 ESC 已注册，关窗后解绑（不长期占用快捷键）', () => {
+  const env = boot({ config: { screensaverEnabled: false, web: { enabled: false, url: '' } } });
+  try {
+    env.g.control.showWeb({ url: 'https://example.com' });
+    assert.equal(typeof env.globalShortcut._reg['Escape'], 'function', '应当注册全局 ESC');
+    env.globalShortcut._reg['Escape']();
+    assert.equal(env.created[0]._destroyed, true, '全局 ESC 必须能关窗');
+    assert.equal(env.globalShortcut._reg['Escape'], undefined, '关窗后应解绑');
+  } finally { env.cleanup(); }
+});
+
+test('★ 开机不重放旧命令（这就是「开机自动弹一次屏保」的根因）', async () => {
+  const staleAt = new Date(Date.now() - 3600 * 1000).toISOString();
+  const env = boot({
+    config: { screensaverEnabled: true },
+    preCommand: { seq: 1700000000000, cmd: 'preview', args: {}, at: staleAt },
+  });
+  try {
+    await new Promise(r => setTimeout(r, 1500));
+    assert.equal(env.onMessageCalls.length, 0, '上次会话的命令不该被执行');
+    assert.ok(!fs.existsSync(path.join(env.dataDir, 'command.json')), '遗留命令文件应被清理');
+  } finally { env.cleanup(); }
+});
+
+test('本次会话的新命令仍会被正常执行，且消费后删除', async () => {
+  const env = boot({ config: { screensaverEnabled: true } });
+  try {
+    await new Promise(r => setTimeout(r, 150));
+    fs.writeFileSync(path.join(env.dataDir, 'command.json'), JSON.stringify({
+      seq: Date.now(), cmd: 'stop', args: {}, at: new Date().toISOString(),
+    }));
+    await new Promise(r => setTimeout(r, 1500));
+    const resPath = path.join(env.dataDir, 'command-result.json');
+    assert.ok(fs.existsSync(resPath), '应当写出命令结果');
+    const res = JSON.parse(fs.readFileSync(resPath, 'utf8'));
+    assert.equal(res.cmd, 'stop');
+    assert.equal(res.ok, true);
+    assert.ok(!fs.existsSync(path.join(env.dataDir, 'command.json')), '消费后应删除命令文件');
   } finally { env.cleanup(); }
 });
