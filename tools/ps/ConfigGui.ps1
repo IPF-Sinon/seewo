@@ -46,7 +46,7 @@ $script:ResultPath  = Join-Path $script:ConfigDir 'command-result.json'
 $script:LogPath     = Join-Path $script:ConfigDir 'aura-screensaver.log'
 $script:Utf8NoBom   = New-Object System.Text.UTF8Encoding($false)
 $script:HostNames   = @('SeewoServiceAssistant')
-if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.4.0' }
+if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.5.0' }
 
 # ---------------------------------------------------------------------------
 # 管理员权限（写入 Program Files 必需）
@@ -251,12 +251,24 @@ function Invoke-CleanupDialog {
 
     $dlg = New-Object System.Windows.Forms.Form
     $dlg.Text = '清理无用文件'
-    $dlg.Size = New-Object System.Drawing.Size(820, 560)
+    $dlg.Size = New-Object System.Drawing.Size(880, 600)
+    $dlg.MinimumSize = New-Object System.Drawing.Size(620, 420)
     $dlg.StartPosition = 'CenterParent'
 
+    # 用 TableLayoutPanel 三行（说明 / 列表填充 / 按钮自适应）。
+    # 之前按钮是绝对坐标、列表也没开横向滚动条 ——
+    # 窗口一窄右侧按钮就被裁掉，长路径也看不全。
+    $lay = New-Object System.Windows.Forms.TableLayoutPanel
+    $lay.Dock = 'Fill'
+    $lay.ColumnCount = 1
+    $lay.RowCount = 3
+    [void]$lay.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+    [void]$lay.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+    [void]$lay.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+
     $top = New-Object System.Windows.Forms.Label
-    $top.Dock = 'Top'
-    $top.Height = 56
+    $top.AutoSize = $true
+    $top.Dock = 'Fill'
     $top.Padding = New-Object System.Windows.Forms.Padding(10, 8, 10, 4)
     if ($items.Count -eq 0) {
         $top.Text = '没有发现需要清理的文件。'
@@ -264,37 +276,49 @@ function Invoke-CleanupDialog {
         $top.Text = ('找到 ' + $items.Count + ' 项本软件产生的无用文件。' + $script:NL +
             '（只清理自己产生的探测/临时/导出文件；官方文件与 .bak 备份一律不动）')
     }
-    $dlg.Controls.Add($top)
-
-    $bar = New-Object System.Windows.Forms.Panel
-    $bar.Dock = 'Bottom'
-    $bar.Height = 52
-
-    $btnAll = New-Object System.Windows.Forms.Button
-    $btnAll.Text = '全选'
-    $btnAll.Size = New-Object System.Drawing.Size(80, 32)
-    $btnAll.Location = New-Object System.Drawing.Point(10, 9)
-    $btnNone = New-Object System.Windows.Forms.Button
-    $btnNone.Text = '全不选'
-    $btnNone.Size = New-Object System.Drawing.Size(80, 32)
-    $btnNone.Location = New-Object System.Drawing.Point(98, 9)
-    $btnDel = New-Object System.Windows.Forms.Button
-    $btnDel.Text = '删除选中项'
-    $btnDel.Size = New-Object System.Drawing.Size(140, 32)
-    $btnDel.Location = New-Object System.Drawing.Point(560, 9)
-    $btnClose3 = New-Object System.Windows.Forms.Button
-    $btnClose3.Text = '关闭'
-    $btnClose3.Size = New-Object System.Drawing.Size(90, 32)
-    $btnClose3.Location = New-Object System.Drawing.Point(710, 9)
-    $btnClose3.add_Click({ $dlg.Close() })
+    [void]$lay.Controls.Add($top)
 
     $list = New-Object System.Windows.Forms.CheckedListBox
     $list.Dock = 'Fill'
     $list.CheckOnClick = $true
+    # 路径很长，必须允许横向滚动，否则只能看到开头
+    $list.HorizontalScrollbar = $true
+    $list.IntegralHeight = $false
+    $list.Margin = New-Object System.Windows.Forms.Padding(8, 0, 8, 0)
     $list.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 8)
     foreach ($it in $items) {
         [void]$list.Items.Add(('[' + $it.Kind + '] ' + $it.Path + '   — ' + $it.Why), $true)
     }
+    [void]$lay.Controls.Add($list)
+
+    # 按钮统一放一条可换行的流式栏：任何窗口宽度都不会被裁
+    $bar = New-Object System.Windows.Forms.FlowLayoutPanel
+    $bar.Dock = 'Fill'
+    $bar.AutoSize = $true
+    $bar.AutoSizeMode = 'GrowAndShrink'
+    $bar.WrapContents = $true
+    $bar.Padding = New-Object System.Windows.Forms.Padding(8, 6, 8, 6)
+
+    $btnAll = New-Object System.Windows.Forms.Button
+    $btnAll.Text = '全选'
+    $btnAll.AutoSize = $true
+    $btnAll.Margin = New-Object System.Windows.Forms.Padding(0, 0, 6, 0)
+
+    $btnNone = New-Object System.Windows.Forms.Button
+    $btnNone.Text = '全不选'
+    $btnNone.AutoSize = $true
+    $btnNone.Margin = New-Object System.Windows.Forms.Padding(0, 0, 20, 0)
+
+    $btnDel = New-Object System.Windows.Forms.Button
+    $btnDel.Text = '删除选中项'
+    $btnDel.AutoSize = $true
+    $btnDel.Margin = New-Object System.Windows.Forms.Padding(0, 0, 6, 0)
+
+    $btnClose3 = New-Object System.Windows.Forms.Button
+    $btnClose3.Text = '关闭'
+    $btnClose3.AutoSize = $true
+    $btnClose3.Margin = New-Object System.Windows.Forms.Padding(0)
+    $btnClose3.add_Click({ $dlg.Close() })
 
     $btnAll.add_Click({ for ($i = 0; $i -lt $list.Items.Count; $i++) { $list.SetItemChecked($i, $true) } })
     $btnNone.add_Click({ for ($i = 0; $i -lt $list.Items.Count; $i++) { $list.SetItemChecked($i, $false) } })
@@ -302,6 +326,7 @@ function Invoke-CleanupDialog {
     $btnDel.add_Click({
         $ok = $false
         $fail = 0
+        $failed = @()
         for ($i = 0; $i -lt $list.Items.Count; $i++) {
             if (-not $list.GetItemChecked($i)) { continue }
             $p = $items[$i].Path
@@ -309,22 +334,29 @@ function Invoke-CleanupDialog {
                 if ($items[$i].Kind -eq '目录') { Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop }
                 else { Remove-Item -LiteralPath $p -Force -ErrorAction Stop }
                 $ok = $true
-            } catch { $fail++ }
+            } catch {
+                $fail++
+                $failed += ($p + '  ==>  ' + $_.Exception.Message)
+            }
         }
         if ($fail -gt 0) {
-            [System.Windows.Forms.MessageBox]::Show(('有 ' + $fail + ' 项删除失败（可能正在被占用）。'), '部分失败', 'OK', 'Warning') | Out-Null
+            [System.Windows.Forms.MessageBox]::Show(
+                ('有 ' + $fail + ' 项删除失败（可能正在被占用）：' + $script:NL + $script:NL +
+                 (@($failed | Select-Object -First 6) -join $script:NL)),
+                '部分失败', 'OK', 'Warning') | Out-Null
         } elseif ($ok) {
             [System.Windows.Forms.MessageBox]::Show('清理完成。', '完成', 'OK', 'Information') | Out-Null
         }
         $dlg.Close()
     })
 
-    $bar.Controls.Add($btnAll)
-    $bar.Controls.Add($btnNone)
-    $bar.Controls.Add($btnDel)
-    $bar.Controls.Add($btnClose3)
-    $dlg.Controls.Add($list)
-    $dlg.Controls.Add($bar)
+    [void]$bar.Controls.Add($btnAll)
+    [void]$bar.Controls.Add($btnNone)
+    [void]$bar.Controls.Add($btnDel)
+    [void]$bar.Controls.Add($btnClose3)
+    [void]$lay.Controls.Add($bar)
+
+    $dlg.Controls.Add($lay)
     [void]$dlg.ShowDialog($form)
 }
 
@@ -366,7 +398,12 @@ function Get-FieldHelpText {
     $L += ''
     $L += '【图片列表】'
     $L += '  要轮播的图片，每行一个完整路径。'
-    $L += '  支持 jpg / jpeg / png / bmp / gif / webp。'
+    $L += '  支持 jpg / jpeg / png / bmp / gif / webp / apng / avif。'
+    $L += ''
+    $L += '  ★ 动图（gif / webp / apng）可以直接用 —— 渲染器用 CSS background-image'
+    $L += '     显示图片，动图是原生播放的，不需要额外设置。'
+    $L += '     注意：动图自己的播放速度由图片本身决定，与「切换间隔」无关；'
+    $L += '     「切换间隔」只决定多久换到下一张。'
     $L += '  用「选择文件夹…」可以一次性加入整个文件夹里的所有图片。'
     $L += ''
     $L += '【图文条目】'
@@ -404,20 +441,24 @@ function Show-HelpDialog {
     $box.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
     $box.Text = Get-FieldHelpText
 
-    $bar = New-Object System.Windows.Forms.Panel
+    # 流式按钮栏：不用绝对坐标，窗口再窄也不会把按钮裁掉
+    $bar = New-Object System.Windows.Forms.FlowLayoutPanel
     $bar.Dock = 'Bottom'
-    $bar.Height = 48
+    $bar.AutoSize = $true
+    $bar.AutoSizeMode = 'GrowAndShrink'
+    $bar.WrapContents = $true
+    $bar.Padding = New-Object System.Windows.Forms.Padding(8, 6, 8, 6)
 
     $btnOk = New-Object System.Windows.Forms.Button
     $btnOk.Text = '知道了'
-    $btnOk.Size = New-Object System.Drawing.Size(110, 32)
-    $btnOk.Location = New-Object System.Drawing.Point(640, 8)
+    $btnOk.AutoSize = $true
+    $btnOk.Margin = New-Object System.Windows.Forms.Padding(0, 0, 6, 0)
     $btnOk.add_Click({ $d.Close() })
 
     $btnCopyH = New-Object System.Windows.Forms.Button
     $btnCopyH.Text = '复制'
-    $btnCopyH.Size = New-Object System.Drawing.Size(90, 32)
-    $btnCopyH.Location = New-Object System.Drawing.Point(540, 8)
+    $btnCopyH.AutoSize = $true
+    $btnCopyH.Margin = New-Object System.Windows.Forms.Padding(0)
     $btnCopyH.add_Click({
         try { [System.Windows.Forms.Clipboard]::SetText($box.Text) } catch { }
     })
@@ -511,22 +552,25 @@ function Show-DiagnosticDialog {
     $box.Font = New-Object System.Drawing.Font('Consolas', 9)
     $box.Text = Get-DiagnosticReport
 
-    $bar = New-Object System.Windows.Forms.Panel
+    $bar = New-Object System.Windows.Forms.FlowLayoutPanel
     $bar.Dock = 'Bottom'
-    $bar.Height = 46
+    $bar.AutoSize = $true
+    $bar.AutoSizeMode = 'GrowAndShrink'
+    $bar.WrapContents = $true
+    $bar.Padding = New-Object System.Windows.Forms.Padding(8, 6, 8, 6)
 
     $btnCopy = New-Object System.Windows.Forms.Button
     $btnCopy.Text = '复制全部'
-    $btnCopy.Size = New-Object System.Drawing.Size(110, 32)
-    $btnCopy.Location = New-Object System.Drawing.Point(12, 7)
+    $btnCopy.AutoSize = $true
+    $btnCopy.Margin = New-Object System.Windows.Forms.Padding(0, 0, 6, 0)
     $btnCopy.add_Click({
         try { [System.Windows.Forms.Clipboard]::SetText($box.Text) } catch { }
     })
 
     $btnSave = New-Object System.Windows.Forms.Button
     $btnSave.Text = '保存到桌面'
-    $btnSave.Size = New-Object System.Drawing.Size(130, 32)
-    $btnSave.Location = New-Object System.Drawing.Point(132, 7)
+    $btnSave.AutoSize = $true
+    $btnSave.Margin = New-Object System.Windows.Forms.Padding(0, 0, 6, 0)
     $btnSave.add_Click({
         try {
             $d = [Environment]::GetFolderPath('Desktop')
@@ -540,14 +584,14 @@ function Show-DiagnosticDialog {
 
     $btnRefresh = New-Object System.Windows.Forms.Button
     $btnRefresh.Text = '刷新'
-    $btnRefresh.Size = New-Object System.Drawing.Size(90, 32)
-    $btnRefresh.Location = New-Object System.Drawing.Point(272, 7)
+    $btnRefresh.AutoSize = $true
+    $btnRefresh.Margin = New-Object System.Windows.Forms.Padding(0, 0, 6, 0)
     $btnRefresh.add_Click({ $box.Text = Get-DiagnosticReport })
 
     $btnClose2 = New-Object System.Windows.Forms.Button
     $btnClose2.Text = '关闭'
-    $btnClose2.Size = New-Object System.Drawing.Size(90, 32)
-    $btnClose2.Location = New-Object System.Drawing.Point(372, 7)
+    $btnClose2.AutoSize = $true
+    $btnClose2.Margin = New-Object System.Windows.Forms.Padding(0, 0, 6, 0)
     $btnClose2.add_Click({ $txt.Close() })
 
     $bar.Controls.Add($btnCopy)
@@ -670,13 +714,17 @@ function Get-InjectionState {
 # ---------------------------------------------------------------------------
 
 function Invoke-Preview {
+    param($Payload)
     if (-not (Test-Path -LiteralPath $script:ConfigDir)) {
         New-Item -ItemType Directory -Path $script:ConfigDir -Force | Out-Null
     }
     $seq = [long]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
+    # 传了 Payload 就用它直接预览（不必先保存到磁盘）
+    $argsObj = [pscustomobject]@{}
+    if ($null -ne $Payload) { $argsObj = [pscustomobject]@{ payload = $Payload } }
     $cmd = [pscustomobject]@{
-        seq = $seq; cmd = 'preview'; args = [pscustomobject]@{}; at = (Get-Date).ToString('o')
-    } | ConvertTo-Json -Depth 5
+        seq = $seq; cmd = 'preview'; args = $argsObj; at = (Get-Date).ToString('o')
+    } | ConvertTo-Json -Depth 8
     [System.IO.File]::WriteAllText($script:CommandPath, $cmd, $script:Utf8NoBom)
 
     $deadline = (Get-Date).AddSeconds(5)
@@ -762,11 +810,17 @@ $flowBottom.WrapContents = $true
 $flowBottom.Padding = New-Object System.Windows.Forms.Padding(10, 8, 10, 6)
 $panelBottom.Controls.Add($flowBottom)
 
-$btnSavePreview = New-Object System.Windows.Forms.Button
-$btnSavePreview.Text = '保存并预览'
-$btnSavePreview.Size = New-Object System.Drawing.Size(210, 38)
-$btnSavePreview.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 10, [System.Drawing.FontStyle]::Bold)
-$flowBottom.Controls.Add($btnSavePreview)
+$btnSave = New-Object System.Windows.Forms.Button
+$btnSave.Text = '保存配置'
+$btnSave.Size = New-Object System.Drawing.Size(130, 38)
+$btnSave.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 10, [System.Drawing.FontStyle]::Bold)
+$flowBottom.Controls.Add($btnSave)
+
+$btnPreview = New-Object System.Windows.Forms.Button
+$btnPreview.Text = '预览屏保'
+$btnPreview.Size = New-Object System.Drawing.Size(130, 38)
+$btnPreview.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 10, [System.Drawing.FontStyle]::Bold)
+$flowBottom.Controls.Add($btnPreview)
 
 $btnUninstall = New-Object System.Windows.Forms.Button
 $btnUninstall.Text = '卸载还原'
@@ -1030,7 +1084,7 @@ $toolTip.SetToolTip($chkOverride, '打开后才使用下面这些自定义设置
 $toolTip.SetToolTip($txtSource, '屏保右下角显示的那行小字，例如「素材来自 XX」。' + $script:NL + '★ 这里填的是展示文案，不是图片路径。')
 $toolTip.SetToolTip($numInterval, '每张图片停留多少秒。' + $script:NL + '渲染器内部会 ×1000 转成毫秒。')
 $toolTip.SetToolTip($flowFit, '图片比例与屏幕不一致时怎么办：' + $script:NL + '留边完整显示 = 不裁剪，两侧留黑边；' + $script:NL + '裁剪铺满 = 填满全屏，但会裁掉超出部分。')
-$toolTip.SetToolTip($imgPanel, '要轮播的图片，每行一个路径。' + $script:NL + '用「选择文件夹…」可一次加入整个文件夹里的图片。')
+$toolTip.SetToolTip($imgPanel, '要轮播的图片，每行一个路径。' + $script:NL + '用「选择文件夹…」可一次加入整个文件夹里的图片。' + $script:NL + '支持静止图与动图：jpg / png / bmp / gif / webp / apng / avif。' + $script:NL + 'gif、webp、apng 会自己动（渲染器用的是 CSS background-image，动图原生播放）。')
 $toolTip.SetToolTip($txtTexts, '屏保上显示的正文文字，每行一条。' + $script:NL + '格式：内容|出处（出处可省略）。')
 $toolTip.SetToolTip($transPanel, '每张图的切换动画编号（0-6 共 7 种）。' + $script:NL + '留空 = 每次随机；填 1 个 = 全部相同；填满 N 个 = 逐图对应。')
 
@@ -1133,7 +1187,7 @@ function Get-ImageFilesInFolder {
     param([string]$Folder)
     if (-not (Test-Path -LiteralPath $Folder)) { return @() }
     return @(Get-ChildItem -LiteralPath $Folder -File -ErrorAction SilentlyContinue |
-        Where-Object { @('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp') -contains $_.Extension.ToLower() } |
+        Where-Object { @('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp', '.apng', '.avif', '.jfif') -contains $_.Extension.ToLower() } |
         Sort-Object Name)
 }
 
@@ -1382,7 +1436,8 @@ function Refresh-UiState {
         $group.Visible = $true
         $btnInstall.Visible = $false
         $btnImageSwap.Visible = $false
-        $btnSavePreview.Visible = $true
+        $btnSave.Visible = $true
+        $btnPreview.Visible = $true
         $btnUninstall.Visible = $true
         $linkLog.Visible = $true
         $linkDiag.Visible = $true
@@ -1400,7 +1455,8 @@ function Refresh-UiState {
         $vstate = Get-InjectionVersionState -State $st
         if ($vstate -eq 'outdated') {
             $group.Visible = $true
-            $btnSavePreview.Visible = $false
+            $btnSave.Visible = $false
+        $btnPreview.Visible = $false
             if ($script:PanelBottom) { $script:PanelBottom.Visible = $false }
             $btnInstall.Visible = $true
             $btnInstall.Text = '升级到最新版（一键）'
@@ -1422,7 +1478,8 @@ function Refresh-UiState {
         Set-Status $msg
     } else {
         $group.Visible = $false
-        $btnSavePreview.Visible = $false
+        $btnSave.Visible = $false
+        $btnPreview.Visible = $false
         $btnUninstall.Visible = $false
         $btnInstall.Visible = $true
         $btnImageSwap.Visible = $true
@@ -1899,7 +1956,7 @@ function Backup-ScreenSaverDir {
 function Test-ImageFile {
     param([string]$Path)
     $ext = [System.IO.Path]::GetExtension($Path).ToLower()
-    return (@('.jpg', '.jpeg', '.png', '.bmp') -contains $ext)
+    return (@('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp', '.apng', '.avif', '.jfif') -contains $ext)
 }
 
 # 循环把源图片覆盖到目标文件上（保留目标文件名，行为与 bat 一致）
@@ -2458,7 +2515,7 @@ $btnPickFiles.add_Click({
     try {
         $of = New-Object System.Windows.Forms.OpenFileDialog
         $of.Multiselect = $true
-        $of.Filter = '图片文件|*.jpg;*.jpeg;*.png;*.bmp;*.gif;*.webp|所有文件|*.*'
+        $of.Filter = '图片/动图|*.jpg;*.jpeg;*.png;*.bmp;*.gif;*.webp;*.apng;*.avif|所有文件|*.*'
         if ($of.ShowDialog() -ne 'OK') { return }
         Set-ImageListFromPaths -Paths $of.FileNames
     } catch {
@@ -2493,53 +2550,65 @@ $btnTransRandom.add_Click({
 $btnTransClear.add_Click({ $txtTrans.Text = '' })
 $linkHelp.add_Click({ Show-HelpDialog })
 
-$btnSavePreview.add_Click({
+# ---- 保存：只写配置，不弹屏保 ----
+$btnSave.add_Click({
     try {
         $cfg = Build-Config
         Save-ConfigFile -Config $cfg
+        Set-Status ('配置已保存（' + (Get-Date).ToString("HH:mm:ss") + '）')
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, '配置有误', 'OK', 'Warning') | Out-Null
+    }
+})
+
+# ---- 预览：用界面当前配置直接唤起屏保，不写盘 ----
+#    刻意与「保存」分开：想看效果不必先落盘，改错了也不会污染已保存的配置。
+$btnPreview.add_Click({
+    try {
+        $cfg = Build-Config
     } catch {
         [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, '配置有误', 'OK', 'Warning') | Out-Null
         return
     }
 
-    # 勾了自定义图集但列表为空：不再阻断预览 ——
-    # 加载器会依次回落到「集控最后下发」「本机缓存的集控图」，仍能看到屏保效果。
-    # （这正是用户遇到的场景：override 为空就说没有可用预览数据）
-    if ($chkOverride.Checked -and (@($cfg.override.imageList).Count -eq 0)) {
-        Add-Log '自定义图集为空，预览将回落到集控下发或本机缓存'
-    }
+    # 只有自定义图集真有图片时才直传载荷；否则交给加载器按优先级回落
+    $payload = $null
+    if ($null -ne $cfg.override -and @($cfg.override.imageList).Count -gt 0) { $payload = $cfg.override }
 
     if ((Get-HostProcs).Count -eq 0) {
         [System.Windows.Forms.MessageBox]::Show(
             ('希沃管家没有在运行，无法预览。' + $script:NL + $script:NL +
              '请先打开希沃管家（或重新点「一键安装」会自动帮你启动）。'),
             '管家未运行', 'OK', 'Warning') | Out-Null
-        Set-Status '已保存，但管家未运行，无法预览。'
+        Set-Status '管家未运行，无法预览。'
         return
     }
 
     Set-Status '正在唤起屏保…'
-    $btnSavePreview.Enabled = $false
-    $r = Invoke-Preview
-    $btnSavePreview.Enabled = $true
+    $btnSave.Enabled = $false
+    $btnPreview.Enabled = $false
+    $r = Invoke-Preview -Payload $payload
+    $btnSave.Enabled = $true
+    $btnPreview.Enabled = $true
 
     if ($null -eq $r) {
         Set-Status '预览超时：命令已发出，但管家没有响应。'
         [System.Windows.Forms.MessageBox]::Show(
             ('预览命令已发出，但管家进程没有响应。' + $script:NL + $script:NL +
-             '请点「查看日志」，确认有「命令桥已启动」这一行。' + $script:NL +
+             '请点「日志」，确认有「命令桥已启动」这一行。' + $script:NL +
              '若没有，请重新点「一键安装」（必要时先「卸载还原」再装一次）。'),
             '预览超时', 'OK', 'Warning') | Out-Null
         return
     }
 
     if ($r.ok) {
-        $src = '自定义图集'
+        $src = '界面当前配置'
         switch ([string]$r.source) {
+            'provided'          { $src = '界面当前配置（未保存）' }
+            'override'          { $src = '已保存的自定义图集' }
             'last-payload'      { $src = '最近一次集控下发' }
             'cloud-picture'     { $src = '集控下发的图片缓存' }
             'screen-saver-json' { $src = '本机缓存的集控屏保' }
-            'override'          { $src = '自定义图集' }
         }
         $n = ''
         if ($null -ne $r.imageCount) { $n = '，图片 ' + $r.imageCount + ' 张' }

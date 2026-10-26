@@ -781,7 +781,7 @@
   function installControl(controller, share, windowManager, cfg, log, state) {
     var control = {};
 
-    control.preview = function () {
+    control.preview = function (args) {
       if (!controller || typeof controller.onMessage !== 'function') {
         return { ok: false, reason: 'no-controller', message: '屏保控制器(120)未就绪，无法预览' };
       }
@@ -794,7 +794,28 @@
         for (k in freshCfg) { if (Object.prototype.hasOwnProperty.call(freshCfg, k)) { cfg[k] = freshCfg[k]; } }
         log.info('预览前已重载配置: override=' + (cfg.override ? '有' : '空'));
       } catch (e) { log.warn('预览前重载配置失败: ' + (e && e.message || e)); }
-      var built = buildPreviewPayload(cfg, controller, log);
+      var mode0 = (cfg.localUrlMode === 'file') ? 'file' : 'raw';
+      var built = null;
+
+      // ★ 界面可以把「当前编辑中的配置」直接当载荷传进来，
+      //   这样预览不必先把配置写盘 —— 「保存」与「预览」彻底独立。
+      var provided = args && args.payload;
+      if (provided && typeof provided === 'object' &&
+          Array.isArray(provided.imageList) && provided.imageList.length) {
+        var p0 = merge(provided, {});
+        p0.imageList = provided.imageList
+          .filter(function (p) { return typeof p === 'string' && p.length > 0; })
+          .map(function (p) { return toLocalUrl(p, mode0); });
+        if (!Array.isArray(p0.textList)) p0.textList = [];
+        if (typeof p0.materialSource !== 'string') p0.materialSource = '';
+        var si0 = Number(p0.switchInterval);
+        p0.switchInterval = (isFinite(si0) && si0 > 0) ? si0 : 15;
+        if (p0.pictureSizeType !== 0 && p0.pictureSizeType !== 1) p0.pictureSizeType = 0;
+        built = { data: p0, source: 'provided' };
+        log.info('预览使用界面直传载荷（' + p0.imageList.length + ' 张），不依赖已保存的配置');
+      } else {
+        built = buildPreviewPayload(cfg, controller, log);
+      }
       if (built.error) return { ok: false, reason: built.reason, message: built.error };
 
       // ★ 发送前硬校验：渲染器要求 imageList 是 string[]，
