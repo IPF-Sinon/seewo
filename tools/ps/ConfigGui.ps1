@@ -46,7 +46,7 @@ $script:ResultPath  = Join-Path $script:ConfigDir 'command-result.json'
 $script:LogPath     = Join-Path $script:ConfigDir 'aura-screensaver.log'
 $script:Utf8NoBom   = New-Object System.Text.UTF8Encoding($false)
 $script:HostNames   = @('SeewoServiceAssistant')
-if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.8.0' }
+if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.9.0' }
 
 # ---------------------------------------------------------------------------
 # 管理员权限（写入 Program Files 必需）
@@ -112,6 +112,7 @@ function Get-DefaultConfig {
         allowManualClose   = $true
         override           = $null
         web                = [pscustomobject]@{ enabled = $false; url = ''; closeOnClick = $false }
+        mode               = 'none'
         logLevel           = 'info'
         backupCount        = 3
     }
@@ -421,11 +422,20 @@ function Get-FieldHelpText {
     $L += '    填满 N 个   = 逐图对应（N = 图片数量），例：0,3,6'
     $L += '  不想手填可以点「随机生成」。'
     $L += ''
+    $L += '【屏保内容（三选一）】'
+    $L += '  自定义图集  用你自己配的图片、文案与转场。'
+    $L += '  网页屏保    用网页当屏保，动画完全由网页决定。'
+    $L += '  不修改图片  图片和文案沿用集控下发的，但「切换间隔 / 图片适配 /'
+    $L += '              转场效果」这三项仍然可以调 —— 它们对集控图也生效。'
+    $L += ''
+    $L += '  ★ 三种模式各自的设置都会保存下来，来回切换不会把另一边弄丢。'
+    $L += ''
     $L += '【网页屏保】'
     $L += '  勾选后，屏保不再用官方那 7 种固定转场，而是直接显示一个网页。'
     $L += '  网页里怎么写就怎么动 —— CSS 动画、JS、视频、Canvas 都能用，'
     $L += '  等于动画效果不受官方限制。'
-    $L += '  地址可以填网址（https://…），也可以填本地 HTML 文件路径'
+    $L += '  地址可以填网址，也可以填本地 HTML 文件路径'
+    $L += '  （点「选择网页文件…」挑一个；或只写 bing.com，会自动补上 https://）。'
     $L += '  （例：D:\anim\show.html，会自动转成 file:///）。'
     $L += '  「立即显示」用来马上看效果；全屏后按 ESC 退出。'
     $L += '  若网页加载失败，会自动回退到官方图片屏保，不会黑屏卡住。'
@@ -960,7 +970,7 @@ $rbModeWeb.Margin = New-Object System.Windows.Forms.Padding(0, 0, 20, 0)
 $modePanel.Controls.Add($rbModeWeb)
 
 $rbModeNone = New-Object System.Windows.Forms.RadioButton
-$rbModeNone.Text = '不修改（沿用集控下发）'
+$rbModeNone.Text = '不修改图片（沿用集控图，参数仍可调）'
 $rbModeNone.AutoSize = $true
 $rbModeNone.Margin = New-Object System.Windows.Forms.Padding(0)
 $modePanel.Controls.Add($rbModeNone)
@@ -1146,6 +1156,12 @@ $webPanel.AutoSize = $true
 $webPanel.WrapContents = $true
 $webPanel.Margin = New-Object System.Windows.Forms.Padding(0)
 
+
+$btnWebPick = New-Object System.Windows.Forms.Button
+$btnWebPick.Text = '选择网页文件…'
+$btnWebPick.AutoSize = $true
+$btnWebPick.Margin = New-Object System.Windows.Forms.Padding(0, 2, 6, 2)
+$webPanel.Controls.Add($btnWebPick)
 
 $btnWebNow = New-Object System.Windows.Forms.Button
 $btnWebNow.Text = '立即显示'
@@ -1392,24 +1408,49 @@ function Set-Status {
 }
 
 # 三选一模式对应的两组成员控件
-$script:ImgRowCtrls = @($lblR1, $txtSource, $lblSourceWarn, $lblR2, $numInterval,
-    $lblR3, $flowFit, $lblR4, $imgPanel, $lblR5, $txtTexts, $lblR6, $transPanel, $lblTransHint)
+# 三选一模式对应的三组成员控件
+#   图片与文案 —— 只有「自定义图集」才替换，所以只在 image 模式显示
+$script:ImgOnlyCtrls = @($lblR1, $txtSource, $lblSourceWarn, $lblR4, $imgPanel, $lblR5, $txtTexts)
+#   显示参数 —— 对集控图也生效，所以「不修改图片」模式下照样能调
+$script:ParamCtrls = @($lblR2, $numInterval, $lblR3, $flowFit, $lblR6, $transPanel, $lblTransHint)
+#   网页 —— 只有「网页屏保」显示
 $script:WebRowCtrls = @($lblR7, $webPanel, $lblWebHint, $lblR8, $txtWebUrl)
+
+# 网页地址归一化：没写协议的自动补 https://
+#   已经是 http/https/file 或本地路径（盘符/UNC/POSIX/相对）的一律不动。
+function Normalize-WebInput {
+    param([string]$Raw)
+    $v = ''
+    if ($null -ne $Raw) { $v = $Raw.Trim() }
+    if ($v -eq '') { return '' }
+    if ($v -match '^[a-zA-Z][a-zA-Z0-9+.-]*://') { return $v }
+    if ($v -match '^[A-Za-z]:[\\/]') { return $v }
+    if ($v -match '^\\\\') { return $v }
+    if ($v -match '^/') { return $v }
+    if ($v -match '^\.') { return $v }
+    return 'https://' + $v
+}
 
 # 按当前模式显示/隐藏对应选项，并同步可用状态
 function Update-ModeVisibility {
     $img = $rbModeImage.Checked
     $web = $rbModeWeb.Checked
-    foreach ($c in $script:ImgRowCtrls) { if ($null -ne $c) { $c.Visible = $img } }
+
+    foreach ($c in $script:ImgOnlyCtrls) { if ($null -ne $c) { $c.Visible = $img } }
+    # 显示参数：网页模式下由网页自己决定一切，所以隐藏；其它模式都显示
+    foreach ($c in $script:ParamCtrls) { if ($null -ne $c) { $c.Visible = (-not $web) } }
     foreach ($c in $script:WebRowCtrls) { if ($null -ne $c) { $c.Visible = $web } }
 
     $txtSource.Enabled = $img
-    $numInterval.Enabled = $img
-    $rbContain.Enabled = $img
-    $rbCover.Enabled = $img
     $txtImages.Enabled = $img
     $txtTexts.Enabled = $img
-    $txtTrans.Enabled = $img
+
+    $numInterval.Enabled = (-not $web)
+    $rbContain.Enabled = (-not $web)
+    $rbCover.Enabled = (-not $web)
+    $txtTrans.Enabled = (-not $web)
+
+    $btnWebPick.Enabled = $web
     $txtWebUrl.Enabled = $web
     $btnWebNow.Enabled = $web
     $btnWebClose.Enabled = $web
@@ -1423,11 +1464,16 @@ function Fill-Form {
     $ov = $null
     if ($null -ne $Cfg.override) { $ov = $Cfg.override }
 
-    # 模式：网页 > 自定义图集 > 不修改（网页优先，避免两者都开着时语义不清）
-    $isWeb = ($null -ne $Cfg.web -and $Cfg.web.enabled -eq $true)
-    $rbModeWeb.Checked = $isWeb
-    $rbModeImage.Checked = ((-not $isWeb) -and ($null -ne $ov))
-    $rbModeNone.Checked = ((-not $isWeb) -and ($null -eq $ov))
+    # 模式优先读 mode 字段；旧配置没有时按 web.enabled / override 推断
+    $m = [string]$Cfg.mode
+    if ($m -ne 'web' -and $m -ne 'image' -and $m -ne 'none') {
+        if ($null -ne $Cfg.web -and $Cfg.web.enabled -eq $true) { $m = 'web' }
+        elseif ($null -ne $ov) { $m = 'image' }
+        else { $m = 'none' }
+    }
+    $rbModeWeb.Checked = ($m -eq 'web')
+    $rbModeImage.Checked = ($m -eq 'image')
+    $rbModeNone.Checked = ($m -eq 'none')
 
     if ($null -ne $Cfg.web -and $null -ne $Cfg.web.url) { $txtWebUrl.Text = [string]$Cfg.web.url } else { $txtWebUrl.Text = '' }
 
@@ -1514,14 +1560,22 @@ function Collect-Override {
 }
 
 function Build-Config {
-    $ov = $null
-    if ($rbModeImage.Checked) { $ov = Collect-Override }
+    # 当前模式：image / web / none
+    $mode = 'none'
+    if ($rbModeImage.Checked) { $mode = 'image' }
+    elseif ($rbModeWeb.Checked) { $mode = 'web' }
+
+    # ★ 两种模式的设置都完整保存下来，由 mode 决定哪个生效 ——
+    #   这样在「自定义图集」和「网页屏保」之间来回切，不会把另一边的设置弄丢。
+    #   （用户反馈「网页屏保存配置似乎有点问题」，就是原来的写法会把图片配置清空）
+    $ov = Collect-Override
     return [pscustomobject]@{
         screensaverEnabled = [bool]$chkEnabled.Checked
         lockCascadeOnClose = [bool]$chkLock.Checked
         allowManualClose = $true
+        mode = $mode
         override = $ov
-        web = [pscustomobject]@{ enabled = [bool]$rbModeWeb.Checked; url = $txtWebUrl.Text.Trim(); closeOnClick = $false }
+        web = [pscustomobject]@{ enabled = ($mode -eq 'web'); url = (Normalize-WebInput -Raw $txtWebUrl.Text); closeOnClick = $false }
         logLevel = 'info'
         backupCount = 3
     }
@@ -2660,9 +2714,32 @@ $btnTransRandom.add_Click({
 })
 $btnTransClear.add_Click({ $txtTrans.Text = '' })
 
+# 选择本地网页文件
+$btnWebPick.add_Click({
+    try {
+        $of = New-Object System.Windows.Forms.OpenFileDialog
+        $of.Multiselect = $false
+        $of.Filter = '网页文件|*.html;*.htm;*.xhtml;*.svg;*.mhtml;*.mht|所有文件|*.*'
+        if ($of.ShowDialog() -ne 'OK') { return }
+        $txtWebUrl.Text = $of.FileName
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, '选择失败', 'OK', 'Warning') | Out-Null
+    }
+})
+
+# 失焦时自动补 https://（用户要求：只写 bing.com 也能用）
+$txtWebUrl.add_Leave({
+    try {
+        $before = $txtWebUrl.Text
+        $after = Normalize-WebInput -Raw $before
+        if ($after -ne $before) { $txtWebUrl.Text = $after }
+    } catch { }
+})
+
 # 立即显示网页屏保（不等集控下发，方便调试网页效果）
 $btnWebNow.add_Click({
-    $u = $txtWebUrl.Text.Trim()
+    $u = Normalize-WebInput -Raw $txtWebUrl.Text
+    if ($u -ne $txtWebUrl.Text) { $txtWebUrl.Text = $u }
     if ($u -eq '') {
         [System.Windows.Forms.MessageBox]::Show('先填一个网址，或本地 HTML 文件的完整路径。', '还没有地址', 'OK', 'Information') | Out-Null
         return

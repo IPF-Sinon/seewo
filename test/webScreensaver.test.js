@@ -52,6 +52,8 @@ function boot(opts) {
       webContents: {
         on(ev, cb) { h['wc:' + ev] = cb; },
         emit(ev, ...a) { if (h['wc:' + ev]) h['wc:' + ev](...a); },
+        insertCSS(css) { w._css = (w._css || '') + css; },
+        executeJavaScript(js) { w._js = (w._js || '') + js; },
       },
       on(ev, cb) { h['w:' + ev] = cb; },
       setAlwaysOnTop() {}, setMenuBarVisibility() {},
@@ -289,14 +291,60 @@ test('★ 路径是文件夹：报错并提示选到具体文件', () => {
   } finally { env.cleanup(); }
 });
 
-test('★ 网页加载失败：自动关窗，绝不留黑屏', () => {
+test('★ 主框架加载失败：显示错误页（自带退出按钮），而不是把屏保关掉', () => {
   const env = boot({ config: { screensaverEnabled: false, web: { enabled: false, url: '' } } });
   try {
     env.g.control.showWeb({ url: 'http://definitely.invalid.example' });
     const w = env.created[0];
+    w.webContents.emit('did-fail-load', {}, -105, 'NAME_NOT_RESOLVED', 'http://definitely.invalid.example', true);
+    assert.equal(w._destroyed, false, '不该直接关窗');
+    assert.ok(String(w._url).startsWith('data:text/html'), '应当转到错误页: ' + w._url);
+  } finally { env.cleanup(); }
+});
+
+test('★★ 子框架失败必须忽略 —— bing.com 的 about:srcdoc 就是这个（原来会把屏保关掉）', () => {
+  const env = boot({ config: { screensaverEnabled: false, web: { enabled: false, url: '' } } });
+  try {
+    env.g.control.showWeb({ url: 'https://bing.com' });
+    const w = env.created[0];
+    w.webContents.emit('did-fail-load', {}, -3, 'ERR_ABORTED', 'about:srcdoc', false);
+    assert.equal(w._destroyed, false, '子框架失败绝不能关屏保');
+    assert.equal(w._url, 'https://bing.com', '也不该跳到错误页');
+  } finally { env.cleanup(); }
+});
+
+test('主框架 ERR_ABORTED(-3) 忽略（重定向/取消导航是正常现象）', () => {
+  const env = boot({ config: { screensaverEnabled: false, web: { enabled: false, url: '' } } });
+  try {
+    env.g.control.showWeb({ url: 'https://example.com' });
+    const w = env.created[0];
+    w.webContents.emit('did-fail-load', {}, -3, 'ERR_ABORTED', 'https://example.com', true);
     assert.equal(w._destroyed, false);
-    w.webContents.emit('did-fail-load', {}, -105, 'NAME_NOT_RESOLVED', 'http://definitely.invalid.example');
-    assert.equal(w._destroyed, true, '加载失败必须自动关闭');
+    assert.equal(w._url, 'https://example.com');
+  } finally { env.cleanup(); }
+});
+
+test('★ 每次加载完成都注入可点击的退出按钮（用户要求触摸可退）', () => {
+  const env = boot({ config: { screensaverEnabled: false, web: { enabled: false, url: '' } } });
+  try {
+    env.g.control.showWeb({ url: 'https://example.com' });
+    const w = env.created[0];
+    w.webContents.emit('did-finish-load');
+    assert.ok(String(w._js || '').includes('__aura_exit_btn'), '应注入退出按钮');
+    assert.ok(String(w._js || '').includes('退出屏保'), '按钮文字应当是「退出屏保」');
+    assert.ok(String(w._css || '').includes('__aura_exit_btn'), '应注入按钮样式');
+  } finally { env.cleanup(); }
+});
+
+test('★ 页面里点退出按钮（哨兵地址）能关窗，不需要 node 权限', () => {
+  const env = boot({ config: { screensaverEnabled: false, web: { enabled: false, url: '' } } });
+  try {
+    env.g.control.showWeb({ url: 'https://example.com' });
+    const w = env.created[0];
+    let prevented = false;
+    w.webContents.emit('will-navigate', { preventDefault() { prevented = true; } }, 'aura-close://now');
+    assert.equal(prevented, true, '应当拦截哨兵地址的导航');
+    assert.equal(w._destroyed, true, '应当关窗');
   } finally { env.cleanup(); }
 });
 
@@ -338,5 +386,54 @@ test('本次会话的新命令仍会被正常执行，且消费后删除', async
     assert.equal(res.cmd, 'stop');
     assert.equal(res.ok, true);
     assert.ok(!fs.existsSync(path.join(env.dataDir, 'command.json')), '消费后应删除命令文件');
+  } finally { env.cleanup(); }
+});
+test('★★ 模式「不修改图片」：集控图保留，但显示参数仍生效', () => {
+  const env = boot({
+    config: {
+      screensaverEnabled: true,
+      mode: 'none',
+      override: { imageList: ['should-be-ignored.jpg'], textList: [{ content: 'x' }], materialSource: 'x', switchInterval: 42, pictureSizeType: 1 },
+      web: { enabled: false, url: '' },
+    },
+  });
+  try {
+    env.controller.onMessage({ url: ROUTE, data: { imageList: ['cloud-a.jpg', 'cloud-b.jpg'], switchInterval: 5, pictureSizeType: 0, materialSource: '集控' } });
+    assert.equal(env.onMessageCalls.length, 1);
+    const d = env.onMessageCalls[0].data;
+    assert.deepEqual(d.imageList, ['cloud-a.jpg', 'cloud-b.jpg'], '图片必须仍是集控的');
+    assert.equal(d.switchInterval, 42, '切换间隔应当被覆盖');
+    assert.equal(d.pictureSizeType, 1, '适配模式应当被覆盖');
+    assert.equal(d.materialSource, '集控', '素材来源属于图片文案，不该被改');
+  } finally { env.cleanup(); }
+});
+
+test('★ 模式「自定义图集」：图片被替换', () => {
+  const env = boot({
+    config: { screensaverEnabled: true, mode: 'image', override: { imageList: ['mine.jpg'], textList: [] }, web: { enabled: false, url: '' } },
+  });
+  try {
+    env.controller.onMessage({ url: ROUTE, data: { imageList: ['cloud.jpg'], switchInterval: 5 } });
+    assert.deepEqual(env.onMessageCalls[0].data.imageList, ['mine.jpg']);
+  } finally { env.cleanup(); }
+});
+
+test('★ 模式「网页屏保」由 mode 字段决定（不是只看 web.enabled）', () => {
+  const env = boot({
+    config: { screensaverEnabled: true, mode: 'web', override: { imageList: ['mine.jpg'] }, web: { enabled: true, url: 'https://example.com' } },
+  });
+  try {
+    env.controller.onMessage({ url: ROUTE, data: { imageList: ['cloud.jpg'] } });
+    assert.equal(env.created.length, 1, '应当开网页窗口');
+    assert.equal(env.onMessageCalls.length, 0);
+  } finally { env.cleanup(); }
+});
+
+test('旧配置没有 mode 字段：按 web.enabled / override 推断（向后兼容）', () => {
+  const env = boot({ config: { screensaverEnabled: true, override: null, web: { enabled: false, url: '' } } });
+  try {
+    env.controller.onMessage({ url: ROUTE, data: { imageList: ['cloud.jpg'] } });
+    assert.equal(env.onMessageCalls.length, 1);
+    assert.deepEqual(env.onMessageCalls[0].data.imageList, ['cloud.jpg'], '没有 override 就该原样放行');
   } finally { env.cleanup(); }
 });

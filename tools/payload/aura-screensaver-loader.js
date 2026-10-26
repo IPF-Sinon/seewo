@@ -194,6 +194,10 @@
     if (typeof cfg.screensaverEnabled !== 'boolean') cfg.screensaverEnabled = DEFAULT_CONFIG.screensaverEnabled;
     if (typeof cfg.lockCascadeOnClose !== 'boolean') cfg.lockCascadeOnClose = DEFAULT_CONFIG.lockCascadeOnClose;
     // merge 是浅合并：文件里给了 web 就会整体覆盖默认值，这里补齐缺的字段
+    // mode 不在默认配置里 —— 缺省时由 resolveMode 按 web.enabled / override 推断，
+    // 这样旧配置（没有 mode 字段）仍然按老行为走。非法值一律清掉。
+    if (cfg.mode !== 'web' && cfg.mode !== 'image' && cfg.mode !== 'none') { delete cfg.mode; }
+
     if (!cfg.web || typeof cfg.web !== 'object' || Array.isArray(cfg.web)) {
       cfg.web = { enabled: false, url: '', closeOnClick: false };
     } else {
@@ -486,7 +490,7 @@
           }
           // ★ 网页屏保：开了就用网页替代官方图片屏保
           try {
-            if (cfg.web && cfg.web.enabled && cfg.web.url) {
+            if (resolveMode(cfg) === 'web' && cfg.web && cfg.web.url) {
               var wr = showWebWindow(cfg.web.url, cfg, log, state);
               if (wr && wr.ok) {
                 state.blocked++;
@@ -510,9 +514,10 @@
               log.info('已记录集控下发载荷（图片 ' + (((msg.data.imageList) || []).length) + ' 张）');
             }
           } catch (e) { }
-          if (cfg.override) {
+          var effOverride = effectiveOverride(cfg);
+          if (effOverride) {
             try {
-              var data = applyOverride(msg.data, cfg.override, log, (cfg.localUrlMode === 'file') ? 'file' : 'raw');
+              var data = applyOverride(msg.data, effOverride, log, (cfg.localUrlMode === 'file') ? 'file' : 'raw');
               forwarded = merge(msg, { data: data });
               controller.__auraLastPayload = data;
               state.overridden++;
@@ -527,10 +532,10 @@
           //   我们改写了 imageList，所以必须**在官方逻辑之前**用正确长度重新广播一次，
           //   否则渲染器轮播索引会错位。
           try {
-            if (cfg.override && share && typeof share.share === 'function') {
+            if (effOverride && share && typeof share.share === 'function') {
               var imgs = (forwarded.data && forwarded.data.imageList) || [];
               var tlist = normalizeTransitionList(
-                (cfg.override && cfg.override.transitionList) || null, imgs.length);
+                (effOverride && effOverride.transitionList) || null, imgs.length);
               share.share(CHANNEL_TRANSITION, tlist);
             }
           } catch (e) { log.warn('预广播转场数组失败（官方逻辑仍会广播）: ' + (e.message || e)); }
@@ -722,6 +727,65 @@
     return v;
   }
 
+  /** 网页打不开时显示的错误页（自带退出按钮，触屏也能点） */
+  function buildWebErrorPage(code, desc, url) {
+    function esc(x) {
+      return String(x == null ? '' : x)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+    var css = 'html,body{margin:0;height:100%;background:#111;color:#eee;' +
+      'font-family:"Microsoft YaHei UI",system-ui,sans-serif;display:flex;' +
+      'align-items:center;justify-content:center}' +
+      '.b{max-width:760px;padding:32px;text-align:center}' +
+      'h1{font-size:26px;margin:0 0 8px;font-weight:600}' +
+      'p{font-size:15px;line-height:1.8;color:#aaa;margin:6px 0}' +
+      'code{color:#ffd479;word-break:break-all}' +
+      'button{margin-top:26px;padding:16px 44px;font-size:18px;border:0;' +
+      'border-radius:10px;background:#2d7ff9;color:#fff;cursor:pointer}' +
+      'button:active{background:#1f66cc}';
+    var html = '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">' +
+      '<style>' + css + '</style></head><body><div class="b">' +
+      '<h1>网页打不开</h1>' +
+      '<p>错误：<code>' + esc(code) + ' ' + esc(desc) + '</code></p>' +
+      '<p>地址：<code>' + esc(url) + '</code></p>' +
+      '<p>常见原因：网址写错、域名解析不了、或这台机器访问不了该站点。</p>' +
+      '<p>换一个地址后点「保存配置」，再点「立即显示」。</p>' +
+      '<button onclick="auraExit()">退出屏保</button>' +
+      '<script>function auraExit(){try{window.close()}catch(e){}' +
+      'try{location.href="aura-close://now"}catch(e){}}<\/script>' +
+      '</div></body></html>';
+    return 'data:text/html;charset=utf-8,' + encodeURIComponent(html);
+  }
+
+  /**
+   * 在页面右下角注入可点击的退出按钮。
+   * 用户明确要求「触摸退出的按钮」—— 不能只靠键盘 ESC。
+   */
+  function injectWebExitButton(w, log) {
+    try {
+      w.webContents.insertCSS(
+        '#__aura_exit_btn{position:fixed;right:20px;bottom:20px;z-index:2147483647;' +
+        'background:rgba(0,0,0,.62);color:#fff;border:1px solid rgba(255,255,255,.35);' +
+        'border-radius:10px;padding:14px 22px;font:16px/1 "Microsoft YaHei UI",sans-serif;' +
+        'cursor:pointer;opacity:.5;transition:opacity .2s;user-select:none;' +
+        '-webkit-user-select:none}' +
+        '#__aura_exit_btn:hover,#__aura_exit_btn:active{opacity:1}');
+      var js = '(function(){try{' +
+        'if(document.getElementById("__aura_exit_btn"))return;' +
+        'var b=document.createElement("div");b.id="__aura_exit_btn";' +
+        'b.textContent="退出屏保";b.setAttribute("role","button");' +
+        'b.onclick=function(ev){try{ev.stopPropagation();ev.preventDefault()}catch(e){};' +
+        'try{window.close()}catch(e){};' +
+        'try{location.href="aura-close://now"}catch(e){}};' +
+        '(document.body||document.documentElement).appendChild(b);' +
+        '}catch(e){}})()';
+      w.webContents.executeJavaScript(js);
+    } catch (e) { log.debug('注入退出按钮失败: ' + (e && e.message || e)); }
+  }
+
   function closeWebWindow(state, log) {
     try {
       // 先解绑全局快捷键，避免屏保关掉后 ESC 还被我们占着
@@ -748,7 +812,6 @@
       try {
         var fsx = require('fs');
         var raw = decodeURI(target.replace(/^file:\/\//i, ''));
-        // 只有 Windows 盘符路径才把 / 还原成 \\；POSIX 路径保持原样
         if (/^[A-Za-z]:/.test(raw)) { raw = raw.replace(/\//g, '\\'); }
         if (!fsx.existsSync(raw)) {
           return { ok: false, reason: 'file-not-found', message: '这个文件不存在：' + raw };
@@ -788,32 +851,41 @@
       try { w.setAlwaysOnTop(true, 'screen-saver'); } catch (e) { }
       try { w.setMenuBarVisibility(false); } catch (e) { }
 
-      // ★ 加载失败立刻关掉。
-      //   用户实测：填了网页后预览 → 全屏黑屏 → 什么都操作不了。
-      //   黑屏本身不致命，致命的是「没有出口」。
+      // ★ 只看主框架的加载失败。
+      //   实测 bing.com 内嵌 about:srcdoc 的 iframe，其 -3 ERR_ABORTED 会被
+      //   did-fail-load 报出来；原来不分主/子框架，页面刚显示就把屏保关了
+      //   （用户反馈「闪一下直接退出屏保」）。-3 本身也是正常现象（重定向）。
       try {
-        w.webContents.on('did-fail-load', function (ev, code, desc, validatedURL) {
+        w.webContents.on('did-fail-load', function (ev, code, desc, failedUrl, isMainFrame) {
           try {
+            if (isMainFrame === false) {
+              log.debug('忽略子框架加载失败(' + code + ' ' + desc + '): ' + failedUrl);
+              return;
+            }
+            if (code === -3) {
+              log.debug('忽略 ERR_ABORTED（重定向/取消导航）: ' + failedUrl);
+              return;
+            }
             state.webLastError = code + ' ' + desc;
-            log.error('网页加载失败(' + code + ' ' + desc + '): ' + validatedURL + ' —— 已自动关闭，避免卡在黑屏');
-            closeWebWindow(state, log);
+            log.error('网页加载失败(' + code + ' ' + desc + '): ' + failedUrl + ' —— 显示错误页');
+            try { w.loadURL(buildWebErrorPage(code, desc, failedUrl)); } catch (e) { }
           } catch (e) { }
         });
       } catch (e) { }
 
-      // ★ 加载超时保护：20 秒还没渲染出来就关掉（网络卡住时也一样有出口）
+      // ★ 加载超时保护：60 秒还没渲染出来就显示错误页（网络卡住也有出口）
       var loaded = false;
       try { w.webContents.on('did-finish-load', function () { loaded = true; }); } catch (e) { }
       try {
         var t = setTimeout(function () {
           try {
             if (!loaded && state.webWin === w) {
-              log.warn('网页 20 秒内没有加载完成，自动关闭以免卡在黑屏');
+              log.warn('网页 60 秒内没有加载完成，转到错误页');
               state.webLastError = 'load-timeout';
-              closeWebWindow(state, log);
+              try { w.loadURL(buildWebErrorPage('timeout', '加载超时', target)); } catch (e) { }
             }
           } catch (e) { }
-        }, 20000);
+        }, 60000);
         if (t && typeof t.unref === 'function') t.unref();
       } catch (e) { }
 
@@ -822,6 +894,18 @@
         w.webContents.on('before-input-event', function (ev, input) {
           try {
             if (input && (input.key === 'Escape' || input.keyCode === 'Escape')) closeWebWindow(state, log);
+          } catch (e) { }
+        });
+      } catch (e) { }
+
+      // 页面里点的「退出屏保」按钮走这个哨兵地址，不用开 node 权限
+      try {
+        w.webContents.on('will-navigate', function (ev, navUrl) {
+          try {
+            if (navUrl && navUrl.indexOf('aura-close:') === 0) {
+              ev.preventDefault();
+              closeWebWindow(state, log);
+            }
           } catch (e) { }
         });
       } catch (e) { }
@@ -850,13 +934,10 @@
       w.loadURL(target);
       try { w.focus(); } catch (e) { }
 
-      // 角标提示怎么退出，几秒后淡出（否则用户根本不知道按哪个键）
+      // 每次加载完成都注入退出按钮（页面内跳转后按钮会被清掉）
       try {
-        w.webContents.once('did-finish-load', function () {
-          try {
-            w.webContents.insertCSS('#__aura_exit_hint{position:fixed;right:16px;bottom:16px;z-index:2147483647;background:rgba(0,0,0,.55);color:#fff;font:13px/1.6 "Microsoft YaHei UI",sans-serif;padding:6px 12px;border-radius:6px;pointer-events:none}');
-            w.webContents.executeJavaScript("(function(){try{if(document.getElementById('__aura_exit_hint'))return;var d=document.createElement('div');d.id='__aura_exit_hint';d.textContent='按 ESC 退出屏保';document.documentElement.appendChild(d);setTimeout(function(){try{d.style.transition='opacity 1s';d.style.opacity='0';setTimeout(function(){try{d.remove()}catch(e){}},1200)}catch(e){}},5000)}catch(e){}})()");
-          } catch (e) { }
+        w.webContents.on('did-finish-load', function () {
+          try { injectWebExitButton(w, log); } catch (e) { }
         });
       } catch (e) { }
 
@@ -867,6 +948,7 @@
       return { ok: false, reason: 'exception', message: String(e && e.message || e) };
     }
   }
+
   /* ------------------------------------------------------------------ *
    * 控制通道：GUI（独立进程）→ 主进程 loader 的命令桥
    *
@@ -901,6 +983,36 @@
    *   2) 否则 → 用上次集控下发的真实载荷
    *   3) 都没有 → 返回错误（绝不能弹一个空白屏保让人以为坏了）
    */
+  /** 解析当前模式；兼容没有 mode 字段的旧配置 */
+  function resolveMode(cfg) {
+    var m = cfg && cfg.mode;
+    if (m === 'web' || m === 'image' || m === 'none') return m;
+    if (cfg && cfg.web && cfg.web.enabled) return 'web';
+    if (cfg && cfg.override) return 'image';
+    return 'none';
+  }
+
+  /**
+   * 当前模式实际要叠加的 override。
+   *   image -> 原样（含 imageList，替换图片与文案）
+   *   none  -> 只取「显示参数」（切换间隔/图片适配/转场），图片与文案仍用集控的
+   *   web   -> 不用 override
+   * 这样「不修改」也能调参数，而且切模式不会丢设置。
+   */
+  function effectiveOverride(cfg) {
+    var ov = cfg && cfg.override;
+    if (!ov || typeof ov !== 'object') return null;
+    if (resolveMode(cfg) === 'image') return ov;
+    if (resolveMode(cfg) === 'web') return null;
+    var only = {};
+    if (typeof ov.switchInterval === 'number') only.switchInterval = ov.switchInterval;
+    if (ov.pictureSizeType === 0 || ov.pictureSizeType === 1) only.pictureSizeType = ov.pictureSizeType;
+    if (Array.isArray(ov.transitionList)) only.transitionList = ov.transitionList;
+    var k = 0, kk;
+    for (kk in only) { if (Object.prototype.hasOwnProperty.call(only, kk)) k++; }
+    return k ? only : null;
+  }
+
   function buildPreviewPayload(cfg, controller, log) {
     var mode = (cfg && cfg.localUrlMode === 'file') ? 'file' : 'raw';
     var attempts = [];
@@ -908,6 +1020,21 @@
 
     function finish(data, source, note) {
       var out2 = data;
+      // 「不修改图片」模式下只把显示参数叠上去（图片与文案仍用集控的）
+      if (source !== 'override') {
+        var ovp = cfg && cfg.override;
+        if (ovp && typeof ovp === 'object') {
+          var po = {};
+          if (typeof ovp.switchInterval === 'number') po.switchInterval = ovp.switchInterval;
+          if (ovp.pictureSizeType === 0 || ovp.pictureSizeType === 1) po.pictureSizeType = ovp.pictureSizeType;
+          if (Array.isArray(ovp.transitionList)) po.transitionList = ovp.transitionList;
+          var hasP = false, kp;
+          for (kp in po) { if (Object.prototype.hasOwnProperty.call(po, kp)) { hasP = true; break; } }
+          if (hasP) {
+            try { out2 = applyOverride(out2, po, log, mode); log.info('已叠加显示参数（切换间隔/适配/转场）'); } catch (e) { }
+          }
+        }
+      }
       if (Array.isArray(out2.imageList)) {
         out2.imageList = out2.imageList.map(function (p) { return toLocalUrl(p, mode); });
       }
@@ -916,7 +1043,7 @@
     }
 
     // ① 用户在界面里配的自定义图集（最高优先级）
-    var ov = cfg && cfg.override;
+    var ov = effectiveOverride(cfg);
     if (ov && typeof ov === 'object') {
       var imgs = Array.isArray(ov.imageList)
         ? ov.imageList.filter(function (p) { return typeof p === 'string' && p.length > 0; })
