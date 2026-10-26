@@ -46,7 +46,7 @@ $script:ResultPath  = Join-Path $script:ConfigDir 'command-result.json'
 $script:LogPath     = Join-Path $script:ConfigDir 'aura-screensaver.log'
 $script:Utf8NoBom   = New-Object System.Text.UTF8Encoding($false)
 $script:HostNames   = @('SeewoServiceAssistant')
-if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.5.0' }
+if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.6.0' }
 
 # ---------------------------------------------------------------------------
 # 管理员权限（写入 Program Files 必需）
@@ -111,6 +111,7 @@ function Get-DefaultConfig {
         lockCascadeOnClose = $false
         allowManualClose   = $true
         override           = $null
+        web                = [pscustomobject]@{ enabled = $false; url = ''; closeOnClick = $false }
         logLevel           = 'info'
         backupCount        = 3
     }
@@ -420,6 +421,15 @@ function Get-FieldHelpText {
     $L += '    填满 N 个   = 逐图对应（N = 图片数量），例：0,3,6'
     $L += '  不想手填可以点「随机生成」。'
     $L += ''
+    $L += '【网页屏保】'
+    $L += '  勾选后，屏保不再用官方那 7 种固定转场，而是直接显示一个网页。'
+    $L += '  网页里怎么写就怎么动 —— CSS 动画、JS、视频、Canvas 都能用，'
+    $L += '  等于动画效果不受官方限制。'
+    $L += '  地址可以填网址（https://…），也可以填本地 HTML 文件路径'
+    $L += '  （例：D:\anim\show.html，会自动转成 file:///）。'
+    $L += '  「立即显示」用来马上看效果；全屏后按 ESC 退出。'
+    $L += '  若网页加载失败，会自动回退到官方图片屏保，不会黑屏卡住。'
+    $L += ''
     $L += '【预览】'
     $L += '  点「保存并预览」会立刻用当前配置唤起一次屏保，方便看效果。'
     $L += '  数据优先级：自定义图集 > 集控最后下发 > 本机缓存的集控图。'
@@ -713,17 +723,17 @@ function Get-InjectionState {
 # 预览（命令桥）
 # ---------------------------------------------------------------------------
 
-function Invoke-Preview {
-    param($Payload)
+# 向管家命令桥发一条命令并等待结果（GUI 是独立进程，只能这样通信）
+function Invoke-BridgeCommand {
+    param([string]$Name, $Args)
     if (-not (Test-Path -LiteralPath $script:ConfigDir)) {
         New-Item -ItemType Directory -Path $script:ConfigDir -Force | Out-Null
     }
     $seq = [long]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
-    # 传了 Payload 就用它直接预览（不必先保存到磁盘）
     $argsObj = [pscustomobject]@{}
-    if ($null -ne $Payload) { $argsObj = [pscustomobject]@{ payload = $Payload } }
+    if ($null -ne $Args) { $argsObj = $Args }
     $cmd = [pscustomobject]@{
-        seq = $seq; cmd = 'preview'; args = $argsObj; at = (Get-Date).ToString('o')
+        seq = $seq; cmd = $Name; args = $argsObj; at = (Get-Date).ToString('o')
     } | ConvertTo-Json -Depth 8
     [System.IO.File]::WriteAllText($script:CommandPath, $cmd, $script:Utf8NoBom)
 
@@ -738,6 +748,14 @@ function Invoke-Preview {
         }
     }
     return $null
+}
+
+function Invoke-Preview {
+    param($Payload)
+    # 传了 Payload 就用它直接预览（不必先保存到磁盘）
+    $a = $null
+    if ($null -ne $Payload) { $a = [pscustomobject]@{ payload = $Payload } }
+    return Invoke-BridgeCommand -Name 'preview' -Args $a
 }
 
 # ---------------------------------------------------------------------------
@@ -1088,6 +1106,48 @@ $toolTip.SetToolTip($imgPanel, '要轮播的图片，每行一个路径。' + $s
 $toolTip.SetToolTip($txtTexts, '屏保上显示的正文文字，每行一条。' + $script:NL + '格式：内容|出处（出处可省略）。')
 $toolTip.SetToolTip($transPanel, '每张图的切换动画编号（0-6 共 7 种）。' + $script:NL + '留空 = 每次随机；填 1 个 = 全部相同；填满 N 个 = 逐图对应。')
 
+$table.Controls.Add((New-AuraRowLabel '网页屏保'))
+$webPanel = New-Object System.Windows.Forms.FlowLayoutPanel
+$webPanel.AutoSize = $true
+$webPanel.WrapContents = $true
+$webPanel.Margin = New-Object System.Windows.Forms.Padding(0)
+
+$chkWeb = New-Object System.Windows.Forms.CheckBox
+$chkWeb.Text = '用网页当屏保'
+$chkWeb.AutoSize = $true
+$chkWeb.Margin = New-Object System.Windows.Forms.Padding(3, 4, 12, 4)
+$webPanel.Controls.Add($chkWeb)
+
+$btnWebNow = New-Object System.Windows.Forms.Button
+$btnWebNow.Text = '立即显示'
+$btnWebNow.AutoSize = $true
+$btnWebNow.Margin = New-Object System.Windows.Forms.Padding(0, 2, 6, 2)
+$webPanel.Controls.Add($btnWebNow)
+
+$btnWebClose = New-Object System.Windows.Forms.Button
+$btnWebClose.Text = '关闭网页'
+$btnWebClose.AutoSize = $true
+$btnWebClose.Margin = New-Object System.Windows.Forms.Padding(0, 2, 0, 2)
+$webPanel.Controls.Add($btnWebClose)
+$table.Controls.Add($webPanel)
+
+$lblWebHint = New-Object System.Windows.Forms.Label
+$lblWebHint.AutoSize = $true
+$lblWebHint.ForeColor = [System.Drawing.Color]::DimGray
+$lblWebHint.Margin = New-Object System.Windows.Forms.Padding(3, 0, 3, 4)
+$lblWebHint.Text = '勾选后，屏保改由网页显示 —— 网页里怎么写就怎么动（CSS 动画 / JS / 视频 / Canvas 都行），所以动画不受官方那 7 种转场限制。'
+$table.Controls.Add($lblWebHint)
+$table.SetColumnSpan($lblWebHint, 2)
+
+$table.Controls.Add((New-AuraRowLabel '网页地址'))
+$txtWebUrl = New-Object System.Windows.Forms.TextBox
+$txtWebUrl.Anchor = 'Left,Right'
+$txtWebUrl.Margin = New-Object System.Windows.Forms.Padding(3, 4, 3, 4)
+$table.Controls.Add($txtWebUrl)
+
+$toolTip.SetToolTip($webPanel, '用网页当屏保：勾选后集控下发的屏保会被替换成这个网页。' + $script:NL + '网页里的 CSS/JS/视频都能用，等于不受官方转场类型限制。' + $script:NL + '按 ESC 可退出全屏。')
+$toolTip.SetToolTip($txtWebUrl, '网址（https://…）或本地 HTML 文件路径，例如 D:\anim\show.html' + $script:NL + '本地路径会自动转成 file:///')
+
 # 素材来源：值看起来像路径时就地告警
 $txtSource.add_TextChanged({
     try {
@@ -1310,6 +1370,10 @@ function Enable-OverrideFields {
     $txtImages.Enabled = $on
     $txtTexts.Enabled = $on
     $txtTrans.Enabled = $on
+    $chkWeb.Enabled = $on
+    $txtWebUrl.Enabled = $on
+    $btnWebNow.Enabled = $on
+    $btnWebClose.Enabled = $on
 }
 
 function Fill-Form {
@@ -1320,6 +1384,10 @@ function Fill-Form {
     $ov = $null
     if ($null -ne $Cfg.override) { $ov = $Cfg.override }
     $chkOverride.Checked = ($null -ne $ov)
+
+    # 网页屏保
+    $chkWeb.Checked = ($null -ne $Cfg.web -and $Cfg.web.enabled -eq $true)
+    if ($null -ne $Cfg.web -and $null -ne $Cfg.web.url) { $txtWebUrl.Text = [string]$Cfg.web.url } else { $txtWebUrl.Text = '' }
 
     if ($null -ne $ov) {
         if ($null -ne $ov.materialSource) { $txtSource.Text = [string]$ov.materialSource } else { $txtSource.Text = '' }
@@ -1411,6 +1479,7 @@ function Build-Config {
         lockCascadeOnClose = [bool]$chkLock.Checked
         allowManualClose = $true
         override = $ov
+        web = [pscustomobject]@{ enabled = [bool]$chkWeb.Checked; url = $txtWebUrl.Text.Trim(); closeOnClick = $false }
         logLevel = 'info'
         backupCount = 3
     }
@@ -2548,6 +2617,35 @@ $btnTransRandom.add_Click({
     }
 })
 $btnTransClear.add_Click({ $txtTrans.Text = '' })
+
+# 立即显示网页屏保（不等集控下发，方便调试网页效果）
+$btnWebNow.add_Click({
+    $u = $txtWebUrl.Text.Trim()
+    if ($u -eq '') {
+        [System.Windows.Forms.MessageBox]::Show('先填一个网址，或本地 HTML 文件的完整路径。', '还没有地址', 'OK', 'Information') | Out-Null
+        return
+    }
+    if ((Get-HostProcs).Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show('希沃管家没有在运行，无法显示网页屏保。', '管家未运行', 'OK', 'Warning') | Out-Null
+        return
+    }
+    Set-Status '正在显示网页…'
+    $r = Invoke-BridgeCommand -Name 'showWeb' -Args ([pscustomobject]@{ url = $u })
+    if ($null -eq $r) { Set-Status '显示网页超时：管家没有响应。'; return }
+    if ($r.ok) {
+        Set-Status ('网页屏保已显示（按 ESC 退出）：' + $u)
+    } else {
+        $m = [string]$r.message
+        if ($m -eq '') { $m = [string]$r.reason }
+        Set-Status ('显示网页失败：' + $m)
+        [System.Windows.Forms.MessageBox]::Show($m, '显示失败', 'OK', 'Warning') | Out-Null
+    }
+})
+
+$btnWebClose.add_Click({
+    $r = Invoke-BridgeCommand -Name 'closeWeb' -Args $null
+    if ($null -ne $r -and $r.ok) { Set-Status '已关闭网页屏保' } else { Set-Status '关闭网页：管家无响应' }
+})
 $linkHelp.add_Click({ Show-HelpDialog })
 
 # ---- 保存：只写配置，不弹屏保 ----

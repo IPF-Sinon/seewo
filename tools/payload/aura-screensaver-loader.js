@@ -139,6 +139,11 @@
     // 实测依据：渲染器两项 bundle 里没有任何 file:// 拼接，且主动把反斜杠翻倍，
     // 故默认 raw。若真机上 CSS url() 加载失败，改成 'file' 即可。
     localUrlMode: 'raw',
+    // 网页屏保：enabled=true 时 /displayScreenSaver 不走官方图片渲染器，
+    //   而是弹出我们自己的全屏窗口加载 url。
+    //   这样动画与版式完全由网页决定（CSS/JS/视频都行），
+    //   不必去改官方渲染器里那 7 种写死的转场。
+    web: { enabled: false, url: '', closeOnClick: false },
     logLevel: 'info',
   };
 
@@ -188,6 +193,14 @@
     // 防御：类型不对就回落到默认，绝不因为脏配置改变行为
     if (typeof cfg.screensaverEnabled !== 'boolean') cfg.screensaverEnabled = DEFAULT_CONFIG.screensaverEnabled;
     if (typeof cfg.lockCascadeOnClose !== 'boolean') cfg.lockCascadeOnClose = DEFAULT_CONFIG.lockCascadeOnClose;
+    // merge 是浅合并：文件里给了 web 就会整体覆盖默认值，这里补齐缺的字段
+    if (!cfg.web || typeof cfg.web !== 'object' || Array.isArray(cfg.web)) {
+      cfg.web = { enabled: false, url: '', closeOnClick: false };
+    } else {
+      if (typeof cfg.web.enabled !== 'boolean') cfg.web.enabled = false;
+      if (typeof cfg.web.url !== 'string') cfg.web.url = '';
+      if (typeof cfg.web.closeOnClick !== 'boolean') cfg.web.closeOnClick = false;
+    }
     return cfg;
   }
 
@@ -471,6 +484,19 @@
             log.info('已拦截 ' + SCREENSAVER_ROUTE + '（屏保已按配置关闭）');
             return;
           }
+          // ★ 网页屏保：开了就用网页替代官方图片屏保
+          try {
+            if (cfg.web && cfg.web.enabled && cfg.web.url) {
+              var wr = showWebWindow(cfg.web.url, cfg, log, state);
+              if (wr && wr.ok) {
+                state.blocked++;
+                log.info('已用网页屏保替代官方屏保');
+                return;
+              }
+              log.warn('网页屏保失败，回退官方屏保: ' + (wr && wr.message || ''));
+            }
+          } catch (e) { log.warn('网页屏保异常，回退官方: ' + (e && e.message || e)); }
+
           // 屏保开启且配置了自定义图集 → 改写载荷后再交给官方逻辑。
           // ★ 注意：必须把**改写后的 msg** 传下去，不能再用 arguments
           //   （arguments 里仍是原始消息，改写会被静默丢弃）。
@@ -659,6 +685,111 @@
     }
   }
 
+  /* ------------------------------------------------------------------ *
+   * 网页屏保：用网页 / 本地 HTML 当屏保
+   *
+   * 为什么走这条路而不是加转场类型：
+   *   官方的 7 种转场是写在 public/vendor.js 里的固定 CSS 关键帧 + JS 映射，
+   *   想加新的必须改渲染器 bundle（1.3MB，类名带构建期哈希），
+   *   每次希沃升级都可能失配 —— 风险和收益不成比例。
+   *   而网页屏保把「动画怎么放」完全交给网页自己（CSS/JS/视频/Canvas），
+   *   既能实现无限自定义动画，又完全不碰官方渲染器。
+   *
+   * 安全网：任何一步失败都只记日志并返回失败，
+   *         由调用方回退到官方屏保 —— 绝不让用户卡在黑屏。
+   * ------------------------------------------------------------------ */
+
+  /** 从全局拿 webpack require，再取 electron 模块（req 只在 boot 作用域里，这里要自己取） */
+  function getElectronModule() {
+    try {
+      var r = globalThis[REQ_KEY];
+      if (typeof r === 'function') return r(0);
+    } catch (e) { }
+    return null;
+  }
+
+  function normalizeWebUrl(u) {
+    if (typeof u !== 'string') return '';
+    var v = u.trim();
+    if (v === '') return '';
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(v)) return v;
+    if (/^[A-Za-z]:[\\\/]/.test(v) || /^\\\\\\\\/.test(v)) {
+      try { return 'file:///' + encodeURI(v.replace(/\\/g, '/')); } catch (e) { return v; }
+    }
+    return v;
+  }
+
+  function closeWebWindow(state, log) {
+    try {
+      if (state && state.webWin) {
+        try { if (!state.webWin.isDestroyed()) state.webWin.close(); } catch (e) { }
+        state.webWin = null;
+        log.info('网页屏保已关闭');
+      }
+      return { ok: true };
+    } catch (e) { return { ok: true }; }
+  }
+
+  function showWebWindow(url, cfg, log, state) {
+    var target = normalizeWebUrl(url);
+    if (!target) return { ok: false, reason: 'empty-url', message: '没有填网页地址或本地 HTML 路径' };
+    try {
+      var el = getElectronModule();
+      var BW = el && el.BrowserWindow;
+      if (!BW) return { ok: false, reason: 'no-browserwindow', message: '拿不到 Electron BrowserWindow，无法显示网页' };
+
+      // 已经开着就只换地址
+      if (state.webWin && !state.webWin.isDestroyed()) {
+        state.webWin.loadURL(target);
+        log.info('网页屏保已切换地址: ' + target);
+        return { ok: true, url: target, reused: true };
+      }
+
+      var bounds = null;
+      try { if (el.screen) bounds = el.screen.getAllDisplays()[0].bounds; } catch (e) { }
+
+      var opt = {
+        frame: false,
+        fullscreen: true,
+        backgroundColor: '#000000',
+        title: 'AuraScreensaver-Web',
+        webPreferences: { nodeIntegration: false, contextIsolation: true }
+      };
+      if (bounds) { opt.x = bounds.x; opt.y = bounds.y; opt.width = bounds.width; opt.height = bounds.height; }
+
+      var w = new BW(opt);
+      state.webWin = w;
+      try { w.setAlwaysOnTop(true, 'screen-saver'); } catch (e) { }
+      try { w.setMenuBarVisibility(false); } catch (e) { }
+
+      // ★ ESC 必须能关：全屏网页若没留出口，用户会被困住
+      try {
+        w.webContents.on('before-input-event', function (ev, input) {
+          try {
+            if (input && (input.key === 'Escape' || input.keyCode === 'Escape')) closeWebWindow(state, log);
+          } catch (e) { }
+        });
+      } catch (e) { }
+
+      // 可选：点一下鼠标就关（默认关，避免误触）
+      if (cfg && cfg.web && cfg.web.closeOnClick) {
+        try {
+          w.webContents.on('before-input-event', function (ev, input) {
+            try { if (input && input.type === 'mouseDown') closeWebWindow(state, log); } catch (e) { }
+          });
+        } catch (e) { }
+      }
+
+      try { w.on('closed', function () { state.webWin = null; }); } catch (e) { }
+
+      w.loadURL(target);
+      log.info('网页屏保已显示: ' + target);
+      return { ok: true, url: target };
+    } catch (e) {
+      log.error('显示网页屏保失败: ' + (e && e.message || e));
+      return { ok: false, reason: 'exception', message: String(e && e.message || e) };
+    }
+  }
   /* ------------------------------------------------------------------ *
    * 控制通道：GUI（独立进程）→ 主进程 loader 的命令桥
    *
@@ -860,6 +991,13 @@
         state.previewBypass = false;
       }
     };
+
+    control.showWeb = function (a) {
+      var u = (a && a.url) || (cfg.web && cfg.web.url) || '';
+      return showWebWindow(u, cfg, log, state);
+    };
+
+    control.closeWeb = function () { return closeWebWindow(state, log); };
 
     control.stop = function () {
       try {
