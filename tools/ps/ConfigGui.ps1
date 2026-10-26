@@ -46,7 +46,23 @@ $script:ResultPath  = Join-Path $script:ConfigDir 'command-result.json'
 $script:LogPath     = Join-Path $script:ConfigDir 'aura-screensaver.log'
 $script:Utf8NoBom   = New-Object System.Text.UTF8Encoding($false)
 $script:HostNames   = @('SeewoServiceAssistant')
-if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.9.0' }
+# ---------------------------------------------------------------------------
+# 未捕获的界面异常：只记日志，绝不弹 .NET 的「未处理的异常」崩溃框。
+#   用户实测动图预览抛 GDI+ 一般性错误时，弹出了那个很吓人的对话框。
+# ---------------------------------------------------------------------------
+try {
+    [System.Windows.Forms.Application]::SetUnhandledExceptionMode(
+        [System.Windows.Forms.UnhandledExceptionMode]::CatchException)
+    [System.Windows.Forms.Application]::add_ThreadException({
+        param($sender, $e)
+        try {
+            $p = Join-Path $script:ConfigDir 'ui-error.log'
+            $txt = ('[' + (Get-Date).ToString('s') + '] ' + $e.Exception.ToString() + [Environment]::NewLine)
+            [System.IO.File]::AppendAllText($p, $txt, (New-Object System.Text.UTF8Encoding($false)))
+        } catch { }
+    })
+} catch { }
+if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.10.0' }
 
 # ---------------------------------------------------------------------------
 # 管理员权限（写入 Program Files 必需）
@@ -1334,6 +1350,49 @@ function Update-ImageCountHint {
 }
 
 # 图片预览窗（列表 + 缩略图）
+# ---------------------------------------------------------------------------
+# 图片预览时的 Image / Stream 生命周期管理
+#   ★ 动图（GIF/WebP/APNG）由 ImageAnimator 在播放期间**不断回读原始流**。
+#     之前用 OpenRead 读完后立刻 Close()，动画取帧时就抛
+#     「GDI+ 中发生一般性错误」（用户实测：动图预览直接崩）。
+#     这里显式持有 Image 与 Stream，换图/关窗前彻底释放。
+# ---------------------------------------------------------------------------
+
+$script:PrevImg = $null
+$script:PrevStream = $null
+
+function Clear-PreviewImage {
+    try { if ($null -ne $script:PrevImg) { $script:PrevImg.Dispose() } } catch { }
+    try { if ($null -ne $script:PrevStream) { $script:PrevStream.Dispose() } } catch { }
+    $script:PrevImg = $null
+    $script:PrevStream = $null
+}
+
+# 把图片装进 PictureBox；成功返回空串，失败返回错误信息
+function Set-PreviewImage {
+    param($PictureBox, [string]$Path)
+
+    # 换图前先彻底释放上一张（含它的流与动画），否则两个动画会打架
+    try { $PictureBox.Image = $null } catch { }
+    Clear-PreviewImage
+
+    if (-not (Test-Path -LiteralPath $Path)) { return '文件不存在' }
+
+    try {
+        # ★ 先整读成字节再包 MemoryStream —— 动图播放期间这个流必须一直可用
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        $ms = New-Object System.IO.MemoryStream(,$bytes)
+        $img = [System.Drawing.Image]::FromStream($ms)
+        $script:PrevImg = $img
+        $script:PrevStream = $ms
+        $PictureBox.Image = $img
+        return ''
+    } catch {
+        Clear-PreviewImage
+        return $_.Exception.Message
+    }
+}
+
 function Show-ImagePreviewDialog {
     $paths = @()
     if ($txtImages.Text.Trim() -ne '') {
@@ -1346,13 +1405,15 @@ function Show-ImagePreviewDialog {
 
     $dlg = New-Object System.Windows.Forms.Form
     $dlg.Text = '图片预览（' + $paths.Count + ' 张）'
-    $dlg.Size = New-Object System.Drawing.Size(820, 560)
+    $dlg.Size = New-Object System.Drawing.Size(860, 580)
+    $dlg.MinimumSize = New-Object System.Drawing.Size(560, 380)
     $dlg.StartPosition = 'CenterParent'
 
     $list = New-Object System.Windows.Forms.ListBox
     $list.Dock = 'Left'
     $list.Width = 320
     $list.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 8)
+    $list.HorizontalScrollbar = $true
 
     $pic = New-Object System.Windows.Forms.PictureBox
     $pic.Dock = 'Fill'
@@ -1373,20 +1434,26 @@ function Show-ImagePreviewDialog {
             $i = $list.SelectedIndex
             if ($i -lt 0 -or $i -ge $paths.Count) { return }
             $p = $paths[$i]
-            if (Test-Path -LiteralPath $p) {
-                $fs = [System.IO.File]::OpenRead($p)
-                $img = [System.Drawing.Image]::FromStream($fs)
-                $pic.Image = $img
-                $fs.Close()
-                $info.Text = $p
+            $err = Set-PreviewImage -PictureBox $pic -Path $p
+            if ($err -ne '') {
+                $info.Text = '无法显示：' + $err
             } else {
-                $pic.Image = $null
-                $info.Text = '文件不存在：' + $p
+                $ext = [System.IO.Path]::GetExtension($p).ToLower()
+                $tag = ''
+                if (@('.gif', '.webp', '.apng', '.avif') -contains $ext) {
+                    $tag = '　［动图，这里和屏保上都会播放］'
+                }
+                $info.Text = $p + $tag
             }
         } catch {
-            $pic.Image = $null
-            $info.Text = '无法加载：' + $_.Exception.Message
+            $info.Text = '无法显示：' + $_.Exception.Message
         }
+    })
+
+    # ★ 关窗前必须断开图片：动画定时器若在控件销毁后回调，就会抛 GDI+ 一般性错误
+    $dlg.add_FormClosing({
+        try { $pic.Image = $null } catch { }
+        Clear-PreviewImage
     })
 
     $right = New-Object System.Windows.Forms.Panel
@@ -1897,7 +1964,11 @@ function Show-SafeModePrompt {
         Add-Log ('已安排安全模式 ' + $Action + '，准备重启')
         [System.Windows.Forms.MessageBox]::Show(
             ('已设置好，即将自动重启进入安全模式。' + $script:NL + $script:NL +
-             '接下来全自动，不需要你操作：' + $script:NL +
+             '正常情况：登录后程序会自动运行并完成' + $what + '，然后自动重启回正常。' + $script:NL + $script:NL +
+'★ 如果登录后 30 秒内没有自动开始（少数机器上计划任务/RunOnce 会被拦），' + $script:NL +
+'   双击下面这个文件即可 —— 它会检测到待办动作自动继续，不用再点任何按钮：' + $script:NL +
+'   ' + (Get-SafeModeLauncherPath) + $script:NL + $script:NL +
+'步骤说明：' + $script:NL +
              '  1) 电脑重启进入安全模式' + $script:NL +
              '  2) 登录后程序自动运行并完成' + $what + $script:NL +
              '  3) 自动关闭安全模式并重启回正常' + $script:NL + $script:NL +
@@ -1915,25 +1986,119 @@ function Show-SafeModePrompt {
 
 # ---------------------------------------------------------------------------
 
+# 待办动作标记：安全模式里「手动打开程序」时靠它自动继续，不需要点任何按钮
+$script:PendingActionPath = Join-Path $script:ConfigDir 'pending-safe-action.txt'
+$script:SafeTaskName = 'AuraScreensaver_SafeMode'
+$script:StableExeDir = Join-Path $env:ProgramData 'seewo\AuraScreensaver'
+
+# 安排「重启进安全模式后自动执行」的触发方式。
+#   ★ 原来只写了一条 HKLM RunOnce —— 实测经常不生效：
+#     RunOnce 在登录时被读取后**立即删除**，命令一旦没起来就彻底没机会了；
+#     而且要求提权的 exe 在登录阶段容易被 UAC 挡住。
+#   现在改成三重保障 + 一个稳定路径。
+# 返回实际生成的安全模式启动器路径（exe 版是 AuraSafe.exe，脚本版是 AuraSafe.cmd）
+function Get-SafeModeLauncherPath {
+    $exe = Join-Path $script:StableExeDir 'AuraSafe.exe'
+    if (Test-Path -LiteralPath $exe) { return $exe }
+    $cmd = Join-Path $script:StableExeDir 'AuraSafe.cmd'
+    if (Test-Path -LiteralPath $cmd) { return $cmd }
+    return $script:StableExeDir
+}
+
+function Register-SafeModeTrigger {
+    param([string]$Action, [string]$Flag)
+
+    $self = Get-SelfExePath
+    if (-not $self) { throw '无法确定自身路径' }
+
+    $leaf = ''
+    try { $leaf = [System.IO.Path]::GetFileName($self).ToLower() } catch { }
+
+    $stable = $self
+    $isHost = ($leaf -eq 'powershell.exe' -or $leaf -eq 'pwsh.exe' -or $leaf -eq 'powershell_ise.exe')
+
+    if ($isHost) {
+        # 从 .ps1 / .bat 启动的：没有独立 exe 可复制，生成一个启动脚本代替。
+        #   否则会把 powershell.exe 复制过去，触发后什么都不会发生。
+        try {
+            if (-not (Test-Path -LiteralPath $script:StableExeDir)) {
+                New-Item -ItemType Directory -Path $script:StableExeDir -Force | Out-Null
+            }
+            $launcher = Join-Path $script:StableExeDir 'AuraSafe.cmd'
+            $runLine = '"' + $self + '" -NoProfile -ExecutionPolicy Bypass -File "' + $PSCommandPath + '" ' + $Flag
+            $lines = @('@echo off', 'chcp 65001 >nul 2>nul', $runLine)
+            [System.IO.File]::WriteAllLines($launcher, $lines, $script:Utf8NoBom)
+            $stable = $launcher
+            Add-Log ('已生成安全模式启动脚本: ' + $stable)
+        } catch { Add-Log ('生成启动脚本失败: ' + $_.Exception.Message) }
+    } else {
+        # 正常情况（打包好的 exe）：复制到机器级稳定路径。
+        #   桌面上的文件可能被移走/删掉，或安全模式登录的是别的账户，
+        #   而触发项里记的是绝对路径 —— 路径一失效就什么都不会发生。
+        try {
+            if (-not (Test-Path -LiteralPath $script:StableExeDir)) {
+                New-Item -ItemType Directory -Path $script:StableExeDir -Force | Out-Null
+            }
+            $copy = Join-Path $script:StableExeDir 'AuraSafe.exe'
+            Copy-Item -LiteralPath $self -Destination $copy -Force -ErrorAction Stop
+            $stable = $copy
+            Add-Log ('已复制到稳定路径: ' + $stable)
+        } catch {
+            Add-Log ('复制到稳定路径失败，退回原路径: ' + $_.Exception.Message)
+        }
+    }
+
+    $cmdLine = '"' + $stable + '" ' + $Flag
+
+    # 待办标记：即使三重触发都没生效，用户在安全模式里手动打开程序也会自动继续
+    try {
+        [System.IO.File]::WriteAllText($script:PendingActionPath, $Action, $script:Utf8NoBom)
+        Add-Log '已写入待办动作标记'
+    } catch { Add-Log ('写待办标记失败: ' + $_.Exception.Message) }
+
+    # 1) 计划任务（登录时、最高权限）—— 比 RunOnce 可靠
+    try {
+        $o = & schtasks.exe /Create /TN $script:SafeTaskName /SC ONLOGON /RL HIGHEST /F /TR $cmdLine 2>&1 | Out-String
+        Add-Log ('schtasks: ' + $o.Trim())
+    } catch { Add-Log ('建计划任务失败: ' + $_.Exception.Message) }
+
+    # 2) RunOnce 兜底：HKLM 与 HKCU 各写一份
+    foreach ($hive in @('HKLM:SOFTWAREMicrosoftWindowsCurrentVersionRunOnce',
+                        'HKCU:SOFTWAREMicrosoftWindowsCurrentVersionRunOnce')) {
+        try {
+            New-ItemProperty -Path $hive -Name 'AuraScreensaver_SafeInstall' -Value $cmdLine -PropertyType String -Force | Out-Null
+            Add-Log ('RunOnce = ' + $cmdLine)
+        } catch { Add-Log ('写 RunOnce 失败: ' + $_.Exception.Message) }
+    }
+
+    return $stable
+}
+
+function Clear-SafeModeTrigger {
+    try { & schtasks.exe /Delete /TN $script:SafeTaskName /F 2>&1 | Out-Null } catch { }
+    foreach ($hive in @('HKLM:SOFTWAREMicrosoftWindowsCurrentVersionRunOnce',
+                        'HKCU:SOFTWAREMicrosoftWindowsCurrentVersionRunOnce')) {
+        try { Remove-ItemProperty -Path $hive -Name 'AuraScreensaver_SafeInstall' -ErrorAction SilentlyContinue } catch { }
+    }
+    try {
+        if (Test-Path -LiteralPath $script:PendingActionPath) { Remove-Item -LiteralPath $script:PendingActionPath -Force }
+    } catch { }
+}
+
 function Invoke-EnterSafeModeAction {
     param([ValidateSet('install', 'uninstall')][string]$Action = 'install')
 
-    $exe = Get-SelfExePath
-    if (-not $exe) { throw '无法确定自身 exe 路径' }
-    $recovery = Write-SafeModeRecoveryBat
-
     $flag = '-SafeInstall'
     if ($Action -eq 'uninstall') { $flag = '-SafeUninstall' }
+
+    $recovery = Write-SafeModeRecoveryBat
 
     Add-Log ('设置 bcdedit safeboot minimal（动作=' + $Action + '）')
     $o = & bcdedit.exe /set '{current}' safeboot minimal 2>&1 | Out-String
     Add-Log ('bcdedit 输出: ' + $o.Trim())
     if ($LASTEXITCODE -ne 0) { throw ('bcdedit 失败：' + $o) }
 
-    $runOnce = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce'
-    $cmdLine = '"' + $exe + '" ' + $flag
-    New-ItemProperty -Path $runOnce -Name 'AuraScreensaver_SafeInstall' -Value $cmdLine -PropertyType String -Force | Out-Null
-    Add-Log ('RunOnce = ' + $cmdLine)
+    [void](Register-SafeModeTrigger -Action $Action -Flag $flag)
 
     & shutdown.exe /r /t 10 /c "AuraScreensaver: 即将重启进入安全模式完成操作" 2>&1 | Out-Null
     return $recovery
@@ -2309,9 +2474,7 @@ function Complete-SafeModeIfNeeded {
     if (-not (Test-IsSafeMode)) { return $false }
 
     Add-Log '当前处于安全模式：清理 safeboot 并安排重启回正常模式'
-    try {
-        Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' -Name 'AuraScreensaver_SafeInstall' -ErrorAction SilentlyContinue
-    } catch { }
+    Clear-SafeModeTrigger
 
     try { [void](Write-SafeModeRecoveryBat) } catch { }
 
@@ -2966,6 +3129,24 @@ $form.add_Shown({
         $btnInstall.Focus()
     }
 })
+
+# 安全模式下「手动打开」：只要有待办动作就直接继续，不需要用户点任何按钮。
+#   （用户反馈：自动触发没生效时还得手动打开再点一下，而提示写的是「全自动」，误导）
+if (-not ($args -contains '-SafeInstall') -and -not ($args -contains '-SafeUninstall')) {
+    try {
+        if ((Test-IsSafeMode) -and (Test-Path -LiteralPath $script:PendingActionPath)) {
+            $pend = ([System.IO.File]::ReadAllText($script:PendingActionPath)).Trim()
+            if ($pend -eq 'install' -or $pend -eq 'uninstall') {
+                try {
+                    Initialize-InstallerLog
+                    Add-Log '检测到安全模式待办动作，自动继续（无需点击）'
+                } catch { }
+                [void](Invoke-SafeModeAutoAction -Action $pend)
+                exit 0
+            }
+        }
+    } catch { }
+}
 
 # 安全模式自动动作：由 RunOnce 在安全模式登录时带 -SafeInstall / -SafeUninstall 调起
 if (($args -contains '-SafeInstall') -or ($args -contains '-SafeUninstall')) {

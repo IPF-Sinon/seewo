@@ -54,6 +54,7 @@ function boot(opts) {
         emit(ev, ...a) { if (h['wc:' + ev]) h['wc:' + ev](...a); },
         insertCSS(css) { w._css = (w._css || '') + css; },
         executeJavaScript(js) { w._js = (w._js || '') + js; },
+        setWindowOpenHandler(fn) { w.__openHandler = fn; },
       },
       on(ev, cb) { h['w:' + ev] = cb; },
       setAlwaysOnTop() {}, setMenuBarVisibility() {},
@@ -435,5 +436,17 @@ test('旧配置没有 mode 字段：按 web.enabled / override 推断（向后�
     env.controller.onMessage({ url: ROUTE, data: { imageList: ['cloud.jpg'] } });
     assert.equal(env.onMessageCalls.length, 1);
     assert.deepEqual(env.onMessageCalls[0].data.imageList, ['cloud.jpg'], '没有 override 就该原样放行');
+  } finally { env.cleanup(); }
+});
+test('★ 点击 target="_blank" 链接要在原窗口打开（否则看着像「点了没反应」）', () => {
+  const env = boot({ config: { screensaverEnabled: false, web: { enabled: false, url: '' } } });
+  try {
+    env.g.control.showWeb({ url: 'https://example.com' });
+    const w = env.created[0];
+    assert.equal(typeof w.webContents.setWindowOpenHandler, 'function');
+    assert.equal(typeof w.__openHandler, 'function', '应当注册了窗口打开处理器');
+    const r = w.__openHandler({ url: 'https://example.com/sub' });
+    assert.equal(r.action, 'deny', '不该另开新窗口（新窗口不在最前，用户会以为没反应）');
+    assert.equal(w._url, 'https://example.com/sub', '应当在原窗口跳转');
   } finally { env.cleanup(); }
 });

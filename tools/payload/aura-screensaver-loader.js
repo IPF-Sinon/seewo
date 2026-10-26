@@ -771,6 +771,7 @@
         'background:rgba(0,0,0,.62);color:#fff;border:1px solid rgba(255,255,255,.35);' +
         'border-radius:10px;padding:14px 22px;font:16px/1 "Microsoft YaHei UI",sans-serif;' +
         'cursor:pointer;opacity:.5;transition:opacity .2s;user-select:none;' +
+'pointer-events:auto;' +
         '-webkit-user-select:none}' +
         '#__aura_exit_btn:hover,#__aura_exit_btn:active{opacity:1}');
       var js = '(function(){try{' +
@@ -908,6 +909,20 @@
             }
           } catch (e) { }
         });
+      } catch (e) { }
+
+      // ★ 让 target="_blank" 的链接在原地打开。
+      //   默认行为是另开一个新窗口 —— 而新窗口不是全屏、也不在最前，
+      //   用户看到的就是「点了没反应」（反馈：网页能浏览但点链接不跳转）。
+      try {
+        if (typeof w.webContents.setWindowOpenHandler === 'function') {
+          w.webContents.setWindowOpenHandler(function (details) {
+            try {
+              if (details && details.url) { w.loadURL(details.url); }
+            } catch (e) { }
+            return { action: 'deny' };
+          });
+        }
       } catch (e) { }
 
       // ★ 全局快捷键：不依赖窗口焦点 —— 这是「什么都操作不了」的兜底出口
