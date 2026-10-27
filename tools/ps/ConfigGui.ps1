@@ -62,7 +62,7 @@ try {
         } catch { }
     })
 } catch { }
-if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.12.0' }
+if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.13.0' }
 
 # ---------------------------------------------------------------------------
 # 管理员权限（写入 Program Files 必需）
@@ -1934,7 +1934,8 @@ function Show-SafeModePrompt {
          '原因：希沃的内核驱动（SeewoZoroWall / SeewoKeLiteLady）会拦截写入，' + $script:NL +
          '目录 ACL 里管理员已是完全控制，但连 takeown 都被拒绝。' + $script:NL + $script:NL +
          '安全模式不加载这些驱动，是唯一可行的路径。' + $script:NL + $script:NL +
-         '点「是」：立即重启到安全模式，自动完成' + $what + '，然后自动重启回正常。' + $script:NL +
+         '点「是」：立即重启到安全模式。' + $script:NL +
+         '（重启后需要你双击一下程序；它会自动完成' + $what + '并自动重启回正常。）' + $script:NL +
          '点「否」：取消（也可以之后手动再点一次）。'),
         $title, 'YesNo', 'Question')
 
@@ -1952,15 +1953,14 @@ function Show-SafeModePrompt {
         $recovery = Invoke-EnterSafeModeAction -Action $Action
         Add-Log ('已安排安全模式 ' + $Action + '，准备重启')
         [System.Windows.Forms.MessageBox]::Show(
-            ('已设置好，即将自动重启进入安全模式。' + $script:NL + $script:NL +
-             '正常情况：登录后程序会自动运行并完成' + $what + '，然后自动重启回正常。' + $script:NL + $script:NL +
-'★ 如果登录后 30 秒内没有自动开始（少数机器上计划任务/RunOnce 会被拦），' + $script:NL +
-'   双击下面这个文件即可 —— 它会检测到待办动作自动继续，不用再点任何按钮：' + $script:NL +
-'   ' + (Get-SafeModeLauncherPath) + $script:NL + $script:NL +
-'步骤说明：' + $script:NL +
-             '  1) 电脑重启进入安全模式' + $script:NL +
-             '  2) 登录后程序自动运行并完成' + $what + $script:NL +
-             '  3) 自动关闭安全模式并重启回正常' + $script:NL + $script:NL +
+                        ('已设置好，即将重启进入安全模式。' + $script:NL + $script:NL +
+             '★ 实测安全模式下系统不会自动启动任何程序，所以需要你手动双击一下；' + $script:NL +
+             '   双击之后程序会自己完成剩下的全部工作，不需要再点任何按钮。' + $script:NL + $script:NL +
+             '  1) 电脑重启进入安全模式，正常登录' + $script:NL +
+             '  2) 双击 AuraScreensaver.exe（就是你刚才运行的那个程序）' + $script:NL +
+             '     ' + (Get-SelfExePath) + $script:NL +
+             '     也可以双击 ' + (Get-SafeModeLauncherPath) + $script:NL +
+             '  3) 程序自动完成' + $what + '，然后自动关闭安全模式并重启回正常' + $script:NL + $script:NL +
              '急救：万一卡在安全模式，双击桌面「退出安全模式.bat」即可恢复。'),
             '即将重启', 'OK', 'Information') | Out-Null
     } catch {
@@ -2100,6 +2100,21 @@ function Invoke-SafeModeAutoAction {
     if (-not (Test-Path -LiteralPath $script:ConfigDir)) {
         try { New-Item -ItemType Directory -Path $script:ConfigDir -Force | Out-Null } catch { }
     }
+    # ★ 防重入：计划任务/RunOnce 与「手动双击」可能同时起两个实例，
+    #   同时改写 app.asar 会把文件搞坏。3 分钟内的第二次直接退出。
+    $lock = Join-Path $script:ConfigDir 'safe-action.lock'
+    try {
+        if (Test-Path -LiteralPath $lock) {
+            $t = [datetime]::MinValue
+            try { $t = [datetime]::Parse(([System.IO.File]::ReadAllText($lock)).Trim()) } catch { }
+            if (((Get-Date) - $t).TotalSeconds -lt 180) {
+                Write-Host '已有另一个实例正在执行安全模式动作，本次退出。'
+                return $false
+            }
+        }
+        [System.IO.File]::WriteAllText($lock, (Get-Date).ToString('o'), $script:Utf8NoBom)
+    } catch { }
+
     $script:InstallLog = Join-Path $script:ConfigDir 'install.log'
     $script:ExeLog = $null
     Add-Log ('==== 安全模式自动' + $Action + ' 开始 ====')
