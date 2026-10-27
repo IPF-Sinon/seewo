@@ -809,6 +809,28 @@
    *   ★ 用户反馈「有些页面只加载一半」「点热搜不跳转」——
    *     没有这些日志就只能靠猜，所以这里尽量把关键事件都记下来。
    */
+  /**
+   * 页面脚本语法不被当前内核支持时，显示一条横幅说明。
+   * 实测：bbs.lty.fan 的主 bundle 在希沃自带的 Electron/Chromium 上直接
+   *   Uncaught SyntaxError: Unexpected token '='
+   * 语法错误**运行时无法补救** —— 站点自己的 JS 解析不了，应用就起不来，
+   * 只剩 CSS 背景图，看着像「卡住」。这里至少把原因说清楚。
+   */
+  function showWebCompatBanner(w, log) {
+    try {
+      w.webContents.insertCSS('#__aura_compat{position:fixed;left:0;right:0;top:0;z-index:2147483647;background:#b3261e;color:#fff;font:14px/1.7 sans-serif;padding:10px 16px;text-align:center;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,.4)}');
+      var js = '(function(){try{' +
+        'if(document.getElementById("__aura_compat"))return;' +
+        'var d=document.createElement("div");d.id="__aura_compat";' +
+        'd.textContent="此网站的脚本语法不受希沃自带浏览器内核支持，页面可能只显示一部分";' +
+        '(document.body||document.documentElement).appendChild(d);' +
+        '}catch(e){}})()';
+      var p = w.webContents.executeJavaScript(js);
+      if (p && typeof p.then === 'function') { p.catch(function () { }); }
+      log.error('已在页面顶部标注「脚本语法不受支持」');
+    } catch (e) { log.debug('注入兼容提示失败: ' + (e && e.message || e)); }
+  }
+
   function attachWebDiagnostics(w, cfg, log, state) {
     var wc = w && w.webContents;
     if (!wc) return;
@@ -995,6 +1017,7 @@
       var w = new BW(opt);
       state.webWin = w;
       state.webLastError = null;
+      state.webCompatNotified = false;
 
       // 很多站点会检测 UA 里的 Electron 而走降级分支（JS 行为异常/功能不可用）。
       // 这里把 Electron 标识去掉，让页面认为自己是普通 Chrome。
@@ -1058,8 +1081,15 @@
           try {
             var av = Array.prototype.slice.call(arguments);
             var lv = av[1], msg = av[2], src = av[4];
-            if (lv && typeof lv === 'object') { msg = lv.message; src = lv.sourceId; lv = lv.level; }
-            log.info('页面控制台[' + lv + '] ' + String(msg).slice(0, 300) + (src ? ' @ ' + src : ''));
+            var m = String(msg);
+            log.info('页面控制台[' + lv + '] ' + m.slice(0, 300) + (src ? ' @ ' + src : ''));
+            // 语法错误运行时无法补救：站点自己的 JS 解析不了，应用就不会启动
+            // （常见表现：只剩背景图、点了没反应）。
+            if (/SyntaxError/i.test(m) && !state.webCompatNotified) {
+              state.webCompatNotified = true;
+              log.error('网页脚本语法不被当前浏览器内核支持（希沃自带内核较旧），该网站无法在这里正常运行');
+              showWebCompatBanner(w, log);
+            }
           } catch (e) { }
         });
       } catch (e) { }
