@@ -23,6 +23,10 @@ jobs:
         shell: pwsh
         run: ./tools/ps/Test-Transition.ps1
 
+      - name: Unit tests (single instance)
+        shell: pwsh
+        run: ./tools/ps/Test-SingleInstance.ps1
+
   build-exe:
     needs: syntax-check
     runs-on: windows-latest

@@ -46,6 +46,75 @@ $script:ResultPath  = Join-Path $script:ConfigDir 'command-result.json'
 $script:LogPath     = Join-Path $script:ConfigDir 'aura-screensaver.log'
 $script:Utf8NoBom   = New-Object System.Text.UTF8Encoding($false)
 $script:HostNames   = @('SeewoServiceAssistant')
+
+# ---------------------------------------------------------------------------
+# 单实例：正常模式重复打开只保留一个窗口。
+#   第二次启动会把已有窗口带到前台，然后自己退出。
+#   ★ 安全模式自动动作（-SafeInstall / -SafeUninstall）不参与 —— 它没有界面，
+#     而且已有独立的防重入锁（safe-action.lock）。
+# ---------------------------------------------------------------------------
+
+# 把已有的主窗口带到前台。纯属「锦上添花」，自行吞掉异常，不参与单实例判定。
+function Show-AuraExistingWindow {
+    param([string]$WindowTitle = '希沃屏保配置')
+    try {
+        if (-not ('AuraWin' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public class AuraWin {
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+}
+'@
+        }
+        $h = [AuraWin]::FindWindow($null, $WindowTitle)
+        if ($h -ne [IntPtr]::Zero) {
+            if ([AuraWin]::IsIconic($h)) { [void][AuraWin]::ShowWindow($h, 9) }
+            [void][AuraWin]::SetForegroundWindow($h)
+        }
+    } catch { }
+}
+
+# 返回 True = 本进程是唯一实例；False = 已有实例（已尝试把它带到前台）
+function Initialize-SingleInstance {
+    param([string]$WindowTitle = '希沃屏保配置')
+
+    # ★ 核心判定只用互斥体，不掺任何其它可能失败的操作。
+    #   之前整个函数套在一个大 try 里，Add-Type 失败也会走到「放行」分支，
+    #   单实例检测就形同虚设（测试里正是这么暴露出来的）。
+    $createdNew = $false
+    $mutex = $null
+    try {
+        # initiallyOwned 必须为 False：若为 True，已有实例持有时本行会一直阻塞，
+        # 第二个实例既退不出也开不了窗口 —— 比不做单实例还糟。
+        # 正确做法是「创建后用 WaitOne(0) 试占」，试不到就是已有实例。
+        $mutex = New-Object System.Threading.Mutex($false, 'LocalAuraScreensaver_GUI', [ref]$createdNew)
+    } catch {
+        return $true   # 连互斥体都建不出来 -> 放行，别卡住用户
+    }
+
+    $gotIt = $false
+    try { $gotIt = $mutex.WaitOne(0) } catch { $gotIt = $false }
+
+    if ($createdNew -and $gotIt) {
+        $script:SingleInstanceMutex = $mutex   # 持有到进程结束
+        return $true
+    }
+
+    try { $mutex.Dispose() } catch { }
+    Show-AuraExistingWindow -WindowTitle $WindowTitle
+    return $false
+}
+
+$script:SingleInstanceMutex = $null
+if (-not (($args -contains '-SafeInstall') -or ($args -contains '-SafeUninstall'))) {
+    if (-not (Initialize-SingleInstance)) { exit 0 }
+}
+
 # ---------------------------------------------------------------------------
 # 未捕获的界面异常：只记日志，绝不弹 .NET 的「未处理的异常」崩溃框。
 #   用户实测动图预览抛 GDI+ 一般性错误时，弹出了那个很吓人的对话框。
@@ -62,7 +131,7 @@ try {
         } catch { }
     })
 } catch { }
-if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.13.0' }
+if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.14.0' }
 
 # ---------------------------------------------------------------------------
 # 管理员权限（写入 Program Files 必需）

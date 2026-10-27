@@ -804,6 +804,152 @@
     } catch (e) { return { ok: true }; }
   }
 
+  /**
+   * 挂上网页诊断：把页面加载过程、跳转、失败、页面报错都写进日志。
+   *   ★ 用户反馈「有些页面只加载一半」「点热搜不跳转」——
+   *     没有这些日志就只能靠猜，所以这里尽量把关键事件都记下来。
+   */
+  function attachWebDiagnostics(w, cfg, log, state) {
+    var wc = w && w.webContents;
+    if (!wc) return;
+
+    function on(ev, fn) {
+      try { wc.on(ev, fn); } catch (e) { }
+    }
+
+    // 1) 跳转：发起（可拦截）、真正开始、完成、页内跳转
+    on('will-navigate', function (ev, url) {
+      try {
+        if (url && url.indexOf('aura-close:') === 0) {
+          ev.preventDefault();
+          log.info('网页[跳转] 命中退出哨兵，关闭屏保');
+          closeWebWindow(state, log);
+          return;
+        }
+        log.info('网页[跳转] will-navigate: ' + url);
+      } catch (e) { }
+    });
+    on('did-start-navigation', function (ev, url, isInPlace, isMainFrame) {
+      try {
+        if (isMainFrame) log.info('网页[跳转] 开始导航: ' + url + (isInPlace ? '（页内）' : ''));
+      } catch (e) { }
+    });
+    on('did-navigate', function (ev, url, httpCode) {
+      try { log.info('网页[跳转] 已到达: ' + url + '  HTTP ' + httpCode); } catch (e) { }
+    });
+    on('did-navigate-in-page', function (ev, url, isMainFrame) {
+      try { if (isMainFrame) log.info('网页[跳转] 页内跳转: ' + url); } catch (e) { }
+    });
+
+    // 2) 加载阶段
+    on('did-start-loading', function () { try { log.info('网页[加载] 开始'); } catch (e) { } });
+    on('did-stop-loading', function () { try { log.info('网页[加载] 结束'); } catch (e) { } });
+    on('dom-ready', function () { try { log.info('网页[加载] DOM 就绪'); } catch (e) { } });
+    on('did-frame-finish-load', function (ev, isMainFrame) {
+      try { if (!isMainFrame) log.debug('网页[加载] 子框架完成'); } catch (e) { }
+    });
+
+    // 3) 失败：主框架记 error，子框架也记（但过滤掉正常的 ERR_ABORTED）
+    on('did-fail-load', function (ev, code, desc, failedUrl, isMainFrame) {
+      try {
+        if (code === -3) { log.debug('网页[失败] 忽略 ERR_ABORTED: ' + failedUrl); return; }
+        var t = (isMainFrame === false) ? '子框架' : '主框架';
+        log.warn('网页[失败] ' + t + ' ' + code + ' ' + desc + ': ' + failedUrl);
+        // 子框架失败只记日志；主框架失败要给出可见的错误页 + 退出按钮，
+        // 否则用户只看到「闪一下回到桌面」，什么信息都没有。
+        if (isMainFrame !== false) {
+          state.webLastError = code + ' ' + desc;
+          try { w.loadURL(buildWebErrorPage(code, desc, failedUrl)); } catch (e) { }
+        }
+      } catch (e) { }
+    });
+    on('did-fail-provisional-load', function (ev, code, desc, failedUrl) {
+      try { log.warn('网页[失败] 预加载失败 ' + code + ' ' + desc + ': ' + failedUrl); } catch (e) { }
+    });
+    on('certificate-error', function (ev, url, err, cert, cb) {
+      try { log.warn('网页[证书] 错误 ' + err + ': ' + url); } catch (e) { }
+    });
+    on('render-process-gone', function (ev, details) {
+      try { log.error('网页[崩溃] 渲染进程退出: ' + JSON.stringify(details || {})); } catch (e) { }
+    });
+    on('unresponsive', function () { try { log.warn('网页[卡死] 无响应'); } catch (e) { } });
+
+    // 3.5) 窗口有焦点时的 ESC（全局快捷键是另一层兜底）
+    on('before-input-event', function (ev, input) {
+      try {
+        if (input && (input.key === 'Escape' || input.keyCode === 'Escape')) closeWebWindow(state, log);
+      } catch (e) { }
+    });
+
+    // 4) 新窗口请求（bing 热搜这类 target=_blank 就走这里）
+    try {
+      if (typeof wc.setWindowOpenHandler === 'function') {
+        wc.setWindowOpenHandler(function (details) {
+          try {
+            var u = details && details.url;
+            log.info('网页[新窗口] ' + u + ' -> 改为在当前窗口打开');
+            if (u && u !== 'about:blank') {
+              // 延后一拍再跳，避免在 Electron 的回调里递归触发
+              setTimeout(function () { try { w.loadURL(u); } catch (e) { } }, 0);
+            } else {
+              log.warn('网页[新窗口] 目标地址为空或 about:blank，站点可能在用 window.open 后再赋值');
+            }
+          } catch (e) { }
+          return { action: 'deny' };
+        });
+      }
+    } catch (e) { }
+
+    // 5) 页面自己的报错（console-message 抓不到 window.onerror 之外的未处理 Promise）
+    on('did-finish-load', function () {
+      try {
+        var hook = '(function(){try{' +
+          'if(window.__auraErrHooked)return "已挂钩";window.__auraErrHooked=1;' +
+          'window.addEventListener("error",function(e){' +
+          'console.error("[AURA_PAGE_ERROR] "+(e.message||"")+" @ "+(e.filename||"")+":"+(e.lineno||0));});' +
+          'window.addEventListener("unhandledrejection",function(e){' +
+          'var r=e&&e.reason;console.error("[AURA_PAGE_ERROR] unhandledrejection: "+((r&&r.message)||r));});' +
+          'return "ok";}catch(e){return "ERR:"+e.message}})()';
+        var p = wc.executeJavaScript(hook);
+        if (p && typeof p.then === 'function') { p.catch(function () { }); }
+      } catch (e) { }
+    });
+    on('did-finish-load', function () {
+      try {
+        var probe = '(function(){try{' +
+          'var rs=(performance&&performance.getEntriesByType)?performance.getEntriesByType("resource"):[];' +
+          'var bad=rs.filter(function(x){return x.responseStatus&&x.responseStatus>=400});' +
+          'return JSON.stringify({readyState:document.readyState,title:document.title,' +
+          'resources:rs.length,badResources:bad.length,' +
+          'badSample:bad.slice(0,5).map(function(x){return x.name+"("+x.responseStatus+")"})});' +
+          '}catch(e){return "ERR:"+e.message}})()';
+        var p2 = wc.executeJavaScript(probe);
+        if (p2 && typeof p2.then === 'function') {
+          p2.then(function (v) { log.info('网页[概况] ' + v); })
+            .catch(function (e) { log.warn('网页[概况] 取不到: ' + (e && e.message || e)); });
+        }
+      } catch (e) { }
+    });
+
+    // 6) target=_blank 的 <a>：在捕获阶段直接原地跳转。
+    //    bing 热搜这类点击走的是 window.open，单一依赖 setWindowOpenHandler
+    //    会在「先开空白窗口再赋值」的站点上失效，所以这里再兜一层。
+    on('did-finish-load', function () {
+      try {
+        var clickHook = '(function(){try{' +
+          'if(window.__auraClickHooked)return "已挂钩";window.__auraClickHooked=1;' +
+          'document.addEventListener("click",function(ev){' +
+          'try{var n=ev.target;while(n&&n.tagName!=="A"){n=n.parentElement}' +
+          'if(!n)return;var t=(n.getAttribute("target")||"").toLowerCase();' +
+          'if(t!=="_blank")return;var h=n.href;if(!h)return;' +
+          'ev.preventDefault();ev.stopPropagation();location.href=h;' +
+          '}catch(e){}},true);return "ok";}catch(e){return "ERR:"+e.message}})()';
+        var p3 = wc.executeJavaScript(clickHook);
+        if (p3 && typeof p3.then === 'function') { p3.catch(function () { }); }
+      } catch (e) { }
+    });
+  }
+
   function showWebWindow(url, cfg, log, state) {
     var target = normalizeWebUrl(url);
     if (!target) return { ok: false, reason: 'empty-url', message: '没有填网页地址或本地 HTML 路径' };
@@ -860,29 +1006,10 @@
         }
       } catch (e) { }
       try { w.setAlwaysOnTop(true, 'screen-saver'); } catch (e) { }
-      try { w.setMenuBarVisibility(false); } catch (e) { }
 
-      // ★ 只看主框架的加载失败。
-      //   实测 bing.com 内嵌 about:srcdoc 的 iframe，其 -3 ERR_ABORTED 会被
-      //   did-fail-load 报出来；原来不分主/子框架，页面刚显示就把屏保关了
-      //   （用户反馈「闪一下直接退出屏保」）。-3 本身也是正常现象（重定向）。
-      try {
-        w.webContents.on('did-fail-load', function (ev, code, desc, failedUrl, isMainFrame) {
-          try {
-            if (isMainFrame === false) {
-              log.debug('忽略子框架加载失败(' + code + ' ' + desc + '): ' + failedUrl);
-              return;
-            }
-            if (code === -3) {
-              log.debug('忽略 ERR_ABORTED（重定向/取消导航）: ' + failedUrl);
-              return;
-            }
-            state.webLastError = code + ' ' + desc;
-            log.error('网页加载失败(' + code + ' ' + desc + '): ' + failedUrl + ' —— 显示错误页');
-            try { w.loadURL(buildWebErrorPage(code, desc, failedUrl)); } catch (e) { }
-          } catch (e) { }
-        });
-      } catch (e) { }
+      // 统一挂上网页诊断（加载/跳转/失败/页面报错）
+      attachWebDiagnostics(w, cfg, log, state);
+      try { w.setMenuBarVisibility(false); } catch (e) { }
 
       // ★ 加载超时保护：60 秒还没渲染出来就显示错误页（网络卡住也有出口）
       var loaded = false;
@@ -898,41 +1025,6 @@
           } catch (e) { }
         }, 60000);
         if (t && typeof t.unref === 'function') t.unref();
-      } catch (e) { }
-
-      // 窗口有焦点时的 ESC
-      try {
-        w.webContents.on('before-input-event', function (ev, input) {
-          try {
-            if (input && (input.key === 'Escape' || input.keyCode === 'Escape')) closeWebWindow(state, log);
-          } catch (e) { }
-        });
-      } catch (e) { }
-
-      // 页面里点的「退出屏保」按钮走这个哨兵地址，不用开 node 权限
-      try {
-        w.webContents.on('will-navigate', function (ev, navUrl) {
-          try {
-            if (navUrl && navUrl.indexOf('aura-close:') === 0) {
-              ev.preventDefault();
-              closeWebWindow(state, log);
-            }
-          } catch (e) { }
-        });
-      } catch (e) { }
-
-      // ★ 让 target="_blank" 的链接在原地打开。
-      //   默认行为是另开一个新窗口 —— 而新窗口不是全屏、也不在最前，
-      //   用户看到的就是「点了没反应」（反馈：网页能浏览但点链接不跳转）。
-      try {
-        if (typeof w.webContents.setWindowOpenHandler === 'function') {
-          w.webContents.setWindowOpenHandler(function (details) {
-            try {
-              if (details && details.url) { w.loadURL(details.url); }
-            } catch (e) { }
-            return { action: 'deny' };
-          });
-        }
       } catch (e) { }
 
       // ★ 全局快捷键：不依赖窗口焦点 —— 这是「什么都操作不了」的兜底出口
