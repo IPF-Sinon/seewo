@@ -1590,8 +1590,10 @@
       attempts++;
       try {
         if (!hooked) {
-          // 空壳先清缓存（工厂曾抛异常的场景）
-          if (clearPoisonedCache(req, 120)) { log.debug('重试前清除模块 120 缓存'); }
+          // ★ 不要在这里无条件清缓存。
+          //   resolveController 内部只在「确实拿到空壳」时才清，
+          //   而无条件清会让下一次 require 重新执行工厂 —— 官方代码若在
+          //   close 时 require 一次，就会拿到一个全新的空实例。
           var c = resolveController(req, log);
           if (c) {
             if (installScreensaverHook(c, share, cfg, log, state)) {
@@ -1602,13 +1604,23 @@
           }
         }
         if (!guarded) {
-          if (clearPoisonedCache(req, 69)) { log.debug('重试前清除模块 69 缓存'); }
-          var w = resolveWindowManager(req, log);
-          if (w) {
-            if (installLockCascadeGuard(w, cfg, log, state)) {
-              guarded = true;
-              result.lockCascadeGuard = true;
-              log.info('级联守卫已安装（第 ' + attempts + ' 次尝试命中）');
+          if (cfg && cfg.lockCascadeOnClose) {
+            // ★ 这是「故意不装守卫」，不是失败。
+            //   之前这里继续走 resolveWindowManager 并每轮 clearPoisonedCache(req,69)，
+            //   把官方窗口管理器换成了全新的空实例（windows 列表为空）——
+            //   于是 closeWindow() 找不到屏保窗口，表现为
+            //   「点屏幕退不出屏保，只能 Alt+F4」。实测日志里就是这样狂刷的。
+            guarded = true;
+            result.lockCascadeGuard = false;
+            log.info('lockCascadeOnClose=true：跳过级联守卫，且不再触碰模块 69');
+          } else {
+            var w = resolveWindowManager(req, log);
+            if (w) {
+              if (installLockCascadeGuard(w, cfg, log, state)) {
+                guarded = true;
+                result.lockCascadeGuard = true;
+                log.info('级联守卫已安装（第 ' + attempts + ' 次尝试命中）');
+              }
             }
           }
         }
@@ -1703,7 +1715,8 @@
             early.modules = { controller: !!c0, windowManager: !!w0, share: !!s0 };
             early.commandBridge = startCommandBridge(ctl0, log);
             log.info('aura-screensaver 已安装(ready后): ' + JSON.stringify({ hook: h0, guard: gd0 }));
-            if (!(h0 && gd0)) { startResolverRetry(req, s0 || {}, cfg, log, state, early); }
+            var needGuard = !(cfg && cfg.lockCascadeOnClose);
+            if (!(h0 && (gd0 || !needGuard))) { startResolverRetry(req, s0 || {}, cfg, log, state, early); }
           } catch (e) {
             log.error('ready 后安装失败: ' + (e && e.message || e));
           }
@@ -1724,7 +1737,9 @@
       var guardOk = installLockCascadeGuard(windowManager, cfg, log, state);
 
       state.ok = hookOk || guardOk;
-      var hooksReady = hookOk && guardOk;
+      // lockCascadeOnClose=true 时守卫是「故意不装」，不算没准备好
+      var needGuard = !(cfg && cfg.lockCascadeOnClose);
+      var hooksReady = hookOk && (guardOk || !needGuard);
 
       // 控制通道：让 GUI 能「立即预览 / 关闭 / 重载配置」
       var control = installControl(controller, share, windowManager, cfg, log, state);

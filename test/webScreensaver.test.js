@@ -80,6 +80,14 @@ function boot(opts) {
   };
   const share = { share() {} };
 
+  // 记录 webpack 模块缓存里被 delete 的 id —— 用来验证我们不会乱清官方模块缓存
+  const deletedIds = [];
+  const modCache = new Proxy({}, {
+    deleteProperty(t, k) { deletedIds.push(String(k)); return delete t[k]; },
+  });
+  modCache[120] = { exports: controller };
+  modCache[69] = { exports: { newWindow() {}, closeWindow() {}, resetWindow() {} } };
+
   delete global.__AURA_SCREENSAVER__;
   global.__AURA_REQ__ = function (id) {
     if (id === 0) {
@@ -91,18 +99,20 @@ function boot(opts) {
         screen: { getAllDisplays: () => [{ bounds: { x: 0, y: 0, width: 1920, height: 1080 } }] },
       };
     }
-    if (id === 120) return controller;
+    if (id === 120) { if (opts.noController) throw new Error('no 120'); return controller; }
     if (id === 69) return { newWindow() {}, closeWindow() {}, resetWindow() {} };
     if (id === 2) return share;
     if (id === 40) return { startLock() {}, startLockTask() {}, userLock() {} };
     throw new Error('no module ' + id);
   };
 
+  global.__AURA_REQ__.c = modCache;
+
   delete require.cache[require.resolve(LOADER)];
   require(LOADER);
 
   return {
-    g: global.__AURA_SCREENSAVER__, controller, onMessageCalls, created, tmp, dataDir, globalShortcut,
+    g: global.__AURA_SCREENSAVER__, controller, onMessageCalls, created, tmp, dataDir, globalShortcut, deletedIds,
     triggerRoute() { controller.__auraOriginalOnMessage({ url: ROUTE, data: { imageList: ['x.jpg'] } }); },
     cleanup() {
       delete global.__AURA_SCREENSAVER__;
@@ -449,4 +459,43 @@ test('★ 点击 target="_blank" 链接要在原窗口打开（否则看着像�
     assert.equal(r.action, 'deny', '不该另开新窗口（新窗口不在最前，用户会以为没反应）');
     assert.equal(w._url, 'https://example.com/sub', '应当在原窗口跳转');
   } finally { env.cleanup(); }
+});
+test('★★ lockCascadeOnClose=true 时绝不清理模块 69 缓存', () => {
+  // 实测 bug：重试循环每轮无条件 clearPoisonedCache(req,69)，
+  // 把官方窗口管理器换成全新的空实例（windows 列表为空），
+  // 于是 closeWindow() 找不到屏保窗口 —— 表现为「点屏幕退不出屏保，只能 Alt+F4」。
+  return (async () => {
+    const env = boot({ config: { screensaverEnabled: true, lockCascadeOnClose: true } });
+    try {
+      assert.equal(env.g.lockCascadeGuard, false, '这种配置下是故意不装守卫');
+      await new Promise(r => setTimeout(r, 2600));
+      assert.ok(!env.deletedIds.includes('69'), '模块 69 的缓存被删了: ' + env.deletedIds.join(','));
+      assert.ok(!env.deletedIds.includes('120'), '模块 120 的缓存也不该被删');
+    } finally { env.cleanup(); }
+  })();
+});
+
+test('★★ 重试循环运行期间也不清模块 69 缓存（这才是 bug 的真实场景）', () => {
+  // 让控制器一开始拿不到 → 强制进入重试循环；再断言重试期间绝不删模块 69。
+  // 旧代码在重试里无条件 clearPoisonedCache(req,69)，会把官方窗口管理器
+  // 换成全新的空实例（windows 为空），closeWindow() 就再也关不掉屏保了。
+  return (async () => {
+    const env = boot({ noController: true, config: { screensaverEnabled: true, lockCascadeOnClose: true } });
+    try {
+      await new Promise(r => setTimeout(r, 2600));
+      assert.ok(!env.deletedIds.includes('69'),
+        '重试期间模块 69 缓存被删了 -> ' + env.deletedIds.join(','));
+    } finally { env.cleanup(); }
+  })();
+});
+
+test('★★ 默认配置下重试期间同样不碰模块 69 缓存', () => {
+  return (async () => {
+    const env = boot({ noController: true, config: { screensaverEnabled: true } });
+    try {
+      await new Promise(r => setTimeout(r, 2600));
+      assert.ok(!env.deletedIds.includes('69'),
+        '重试期间模块 69 缓存被删了 -> ' + env.deletedIds.join(','));
+    } finally { env.cleanup(); }
+  })();
 });
