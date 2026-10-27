@@ -55,6 +55,8 @@ function boot(opts) {
         insertCSS(css) { w._css = (w._css || '') + css; },
         executeJavaScript(js) { w._js = (w._js || '') + js; },
         setWindowOpenHandler(fn) { w.__openHandler = fn; },
+        getUserAgent() { return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Electron/25.0.0 AuraScreensaver/1.11.0'; },
+        setUserAgent(ua) { w._ua = ua; },
       },
       on(ev, cb) { h['w:' + ev] = cb; },
       setAlwaysOnTop() {}, setMenuBarVisibility() {},
@@ -498,4 +500,15 @@ test('★★ 默认配置下重试期间同样不碰模块 69 缓存', () => {
         '重试期间模块 69 缓存被删了 -> ' + env.deletedIds.join(','));
     } finally { env.cleanup(); }
   })();
+});
+test('★ 去掉 UA 里的 Electron 标识（很多站点据此走降级分支，表现为「网页 js 不生效」）', () => {
+  const env = boot({ config: { screensaverEnabled: false, web: { enabled: false, url: '' } } });
+  try {
+    env.g.control.showWeb({ url: 'https://example.com' });
+    const ua = env.created[0]._ua;
+    assert.ok(ua, '应当重设过 UA');
+    assert.ok(!/Electron/.test(ua), 'UA 里不该再有 Electron: ' + ua);
+    assert.ok(!/AuraScreensaver/.test(ua), 'UA 里不该有我们的名字: ' + ua);
+    assert.ok(/Mozilla/.test(ua), '应当仍是正常浏览器 UA: ' + ua);
+  } finally { env.cleanup(); }
 });

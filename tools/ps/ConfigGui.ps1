@@ -62,7 +62,7 @@ try {
         } catch { }
     })
 } catch { }
-if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.11.0' }
+if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.12.0' }
 
 # ---------------------------------------------------------------------------
 # 管理员权限（写入 Program Files 必需）
@@ -453,7 +453,8 @@ function Get-FieldHelpText {
     $L += '  地址可以填网址，也可以填本地 HTML 文件路径'
     $L += '  （点「选择网页文件…」挑一个；或只写 bing.com，会自动补上 https://）。'
     $L += '  （例：D:\anim\show.html，会自动转成 file:///）。'
-    $L += '  「立即显示」用来马上看效果；全屏后按 ESC 退出。'
+    $L += '  改完地址点「保存配置」，再点「预览屏保」即可马上看效果；'
+    $L += '  屏保起来后，右下角有「退出屏保」按钮，也可以按 ESC。'
     $L += '  若网页加载失败，会自动回退到官方图片屏保，不会黑屏卡住。'
     $L += ''
     $L += '【预览】'
@@ -1179,17 +1180,6 @@ $btnWebPick.AutoSize = $true
 $btnWebPick.Margin = New-Object System.Windows.Forms.Padding(0, 2, 6, 2)
 $webPanel.Controls.Add($btnWebPick)
 
-$btnWebNow = New-Object System.Windows.Forms.Button
-$btnWebNow.Text = '立即显示'
-$btnWebNow.AutoSize = $true
-$btnWebNow.Margin = New-Object System.Windows.Forms.Padding(0, 2, 6, 2)
-$webPanel.Controls.Add($btnWebNow)
-
-$btnWebClose = New-Object System.Windows.Forms.Button
-$btnWebClose.Text = '关闭网页'
-$btnWebClose.AutoSize = $true
-$btnWebClose.Margin = New-Object System.Windows.Forms.Padding(0, 2, 0, 2)
-$webPanel.Controls.Add($btnWebClose)
 $table.Controls.Add($webPanel)
 
 $lblWebHint = New-Object System.Windows.Forms.Label
@@ -1519,8 +1509,7 @@ function Update-ModeVisibility {
 
     $btnWebPick.Enabled = $web
     $txtWebUrl.Enabled = $web
-    $btnWebNow.Enabled = $web
-    $btnWebClose.Enabled = $web
+
 }
 
 function Fill-Form {
@@ -2898,37 +2887,6 @@ $txtWebUrl.add_Leave({
         if ($after -ne $before) { $txtWebUrl.Text = $after }
     } catch { }
 })
-
-# 立即显示网页屏保（不等集控下发，方便调试网页效果）
-$btnWebNow.add_Click({
-    $u = Normalize-WebInput -Raw $txtWebUrl.Text
-    if ($u -ne $txtWebUrl.Text) { $txtWebUrl.Text = $u }
-    if ($u -eq '') {
-        [System.Windows.Forms.MessageBox]::Show('先填一个网址，或本地 HTML 文件的完整路径。', '还没有地址', 'OK', 'Information') | Out-Null
-        return
-    }
-    if ((Get-HostProcs).Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show('希沃管家没有在运行，无法显示网页屏保。', '管家未运行', 'OK', 'Warning') | Out-Null
-        return
-    }
-    Set-Status '正在显示网页…'
-    $r = Invoke-BridgeCommand -Name 'showWeb' -Args ([pscustomobject]@{ url = $u })
-    if ($null -eq $r) { Set-Status '显示网页超时：管家没有响应。'; return }
-    if ($r.ok) {
-        Set-Status ('网页屏保已显示（按 ESC 退出）：' + $u)
-    } else {
-        $m = [string]$r.message
-        if ($m -eq '') { $m = [string]$r.reason }
-        Set-Status ('显示网页失败：' + $m)
-        [System.Windows.Forms.MessageBox]::Show($m, '显示失败', 'OK', 'Warning') | Out-Null
-    }
-})
-
-$btnWebClose.add_Click({
-    $r = Invoke-BridgeCommand -Name 'closeWeb' -Args $null
-    if ($null -ne $r -and $r.ok) { Set-Status '已关闭网页屏保' } else { Set-Status '关闭网页：管家无响应' }
-})
-$linkHelp.add_Click({ Show-HelpDialog })
 
 # ---- 保存：只写配置，不弹屏保 ----
 $btnSave.add_Click({

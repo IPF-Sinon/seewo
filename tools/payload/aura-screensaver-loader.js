@@ -752,7 +752,7 @@
       '<p>错误：<code>' + esc(code) + ' ' + esc(desc) + '</code></p>' +
       '<p>地址：<code>' + esc(url) + '</code></p>' +
       '<p>常见原因：网址写错、域名解析不了、或这台机器访问不了该站点。</p>' +
-      '<p>换一个地址后点「保存配置」，再点「立即显示」。</p>' +
+      '<p>换一个地址后点「保存配置」，再点「预览屏保」。</p>' +
       '<button onclick="auraExit()">退出屏保</button>' +
       '<script>function auraExit(){try{window.close()}catch(e){}' +
       'try{location.href="aura-close://now"}catch(e){}}<\/script>' +
@@ -849,6 +849,16 @@
       var w = new BW(opt);
       state.webWin = w;
       state.webLastError = null;
+
+      // 很多站点会检测 UA 里的 Electron 而走降级分支（JS 行为异常/功能不可用）。
+      // 这里把 Electron 标识去掉，让页面认为自己是普通 Chrome。
+      try {
+        var ua = w.webContents.getUserAgent();
+        if (ua) {
+          var ua2 = ua.replace(/\sElectron\/[0-9.]+/g, '').replace(/\sAuraScreensaver\/[0-9.]+/g, '');
+          if (ua2 !== ua) { w.webContents.setUserAgent(ua2); log.info('已去掉 UA 里的 Electron 标识'); }
+        }
+      } catch (e) { }
       try { w.setAlwaysOnTop(true, 'screen-saver'); } catch (e) { }
       try { w.setMenuBarVisibility(false); } catch (e) { }
 
@@ -948,6 +958,42 @@
 
       w.loadURL(target);
       try { w.focus(); } catch (e) { }
+
+      // ★ 把页面自己的 console 转发到我们的日志。
+      //   用户反馈「网页 js 似乎不生效」—— 只有拿到页面报错才能定位，不能靠猜。
+      try {
+        w.webContents.on('console-message', function () {
+          try {
+            var av = Array.prototype.slice.call(arguments);
+            var lv = av[1], msg = av[2], src = av[4];
+            if (lv && typeof lv === 'object') { msg = lv.message; src = lv.sourceId; lv = lv.level; }
+            log.info('页面控制台[' + lv + '] ' + String(msg).slice(0, 300) + (src ? ' @ ' + src : ''));
+          } catch (e) { }
+        });
+      } catch (e) { }
+
+      // 渲染进程崩溃 / 无响应也要记下来
+      try {
+        w.webContents.on('render-process-gone', function (ev, details) {
+          try { log.error('网页渲染进程退出: ' + JSON.stringify(details || {})); } catch (e) { }
+        });
+        w.webContents.on('unresponsive', function () {
+          try { log.warn('网页无响应'); } catch (e) { }
+        });
+      } catch (e) { }
+
+      // ★ JS 自检：正常应返回 2。若返回 ERR 或整体失败，说明页面 JS 被禁/被拦。
+      try {
+        w.webContents.on('did-finish-load', function () {
+          try {
+            var p = w.webContents.executeJavaScript('(function(){try{return String(1+1)}catch(e){return "ERR:"+e.message}})()');
+            if (p && typeof p.then === 'function') {
+              p.then(function (v) { log.info('网页 JS 自检: ' + v + '（2 = 正常）'); })
+               .catch(function (e) { log.warn('网页 JS 自检失败: ' + (e && e.message || e)); });
+            }
+          } catch (e) { log.warn('网页 JS 自检异常: ' + (e && e.message || e)); }
+        });
+      } catch (e) { }
 
       // 每次加载完成都注入退出按钮（页面内跳转后按钮会被清掉）
       try {
