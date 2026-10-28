@@ -15,7 +15,7 @@
       每个条目的 offset 是相对 dataOffset 的字符串，size 是数字
 #>
 
-$script:InjectionVersion = '1.17.0'
+$script:InjectionVersion = '1.18.0'
 $script:MarkBegin = '/* ===== aura-screensaver injection BEGIN ===== */'
 $script:MarkEnd   = '/* ===== aura-screensaver injection END ===== */'
 

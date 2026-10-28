@@ -43,7 +43,7 @@ if (-not $LoaderPath) {
     $LoaderPath = Join-Path $script:ScriptDir (Join-Path '..' (Join-Path 'payload' 'aura-screensaver-loader.js'))
 }
 
-$script:InjectionVersion = '1.17.0'
+$script:InjectionVersion = '1.18.0'
 $script:MarkBegin = '/* ===== aura-screensaver injection BEGIN ===== */'
 $script:MarkEnd   = '/* ===== aura-screensaver injection END ===== */'
 

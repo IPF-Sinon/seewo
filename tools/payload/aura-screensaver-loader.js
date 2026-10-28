@@ -1112,7 +1112,37 @@
       ];
       var child = cp.spawn(exe, args, { detached: false, stdio: 'ignore' });
       state.webProc = child;
-      try { child.on('exit', function () { if (state.webProc === child) { state.webProc = null; } }); } catch (e) { }
+
+      // ★ 系统浏览器是**独立进程**：内置窗口那套 ESC / 注入按钮都管不到它。
+      //   所以这里在希沃的 Electron 主进程里注册**全局**快捷键 ——
+      //   即使焦点在外部的 Chrome 上，按键也先到我们这里，可以杀掉那个进程。
+      //   （不加这个，用户就只能 Alt+F4，很不好用。）
+      try {
+        var elg = getElectronModule();
+        var gs = elg && elg.globalShortcut;
+        if (gs) {
+          state.webShortcut = gs;
+          try { gs.register('Escape', function () { closeWebWindow(state, log); }); } catch (e) { }
+          try { gs.register('CommandOrControl+Alt+Q', function () { closeWebWindow(state, log); }); } catch (e) { }
+          log.info('已注册退出快捷键：ESC 或 Ctrl+Alt+Q（备用 Alt+F4）');
+        } else {
+          log.warn('拿不到 globalShortcut，系统浏览器模式只能按 Alt+F4 退出');
+        }
+      } catch (e) { }
+
+      try {
+        child.on('exit', function () {
+          if (state.webProc === child) { state.webProc = null; }
+          // 进程没了就把全局快捷键解绑，别一直占着 ESC
+          try {
+            if (state.webShortcut) {
+              try { state.webShortcut.unregister('Escape'); } catch (e) { }
+              try { state.webShortcut.unregister('CommandOrControl+Alt+Q'); } catch (e) { }
+              state.webShortcut = null;
+            }
+          } catch (e) { }
+        });
+      } catch (e) { }
 
       log.info('网页屏保已用系统浏览器打开（kiosk，内核为最新 Chromium）');
       log.info('  浏览器: ' + exe);
