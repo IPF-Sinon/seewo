@@ -452,15 +452,19 @@ test('旧配置没有 mode 字段：按 web.enabled / override 推断（向后�
 });
 test('★ 点击 target="_blank" 链接要在原窗口打开（否则看着像「点了没反应」）', () => {
   const env = boot({ config: { screensaverEnabled: false, web: { enabled: false, url: '' } } });
-  try {
-    env.g.control.showWeb({ url: 'https://example.com' });
-    const w = env.created[0];
-    assert.equal(typeof w.webContents.setWindowOpenHandler, 'function');
-    assert.equal(typeof w.__openHandler, 'function', '应当注册了窗口打开处理器');
-    const r = w.__openHandler({ url: 'https://example.com/sub' });
-    assert.equal(r.action, 'deny', '不该另开新窗口（新窗口不在最前，用户会以为没反应）');
-    assert.equal(w._url, 'https://example.com/sub', '应当在原窗口跳转');
-  } finally { env.cleanup(); }
+  return (async () => {
+    try {
+      env.g.control.showWeb({ url: 'https://example.com' });
+      const w = env.created[0];
+      assert.equal(typeof w.webContents.setWindowOpenHandler, 'function');
+      assert.equal(typeof w.__openHandler, 'function', '应当注册了窗口打开处理器');
+      const r = w.__openHandler({ url: 'https://example.com/sub' });
+      assert.equal(r.action, 'deny', '不该另开新窗口（新窗口不在最前，用户会以为没反应）');
+      // 跳转是延后一拍做的（避免在 Electron 回调里递归触发）
+      await new Promise(res => setTimeout(res, 20));
+      assert.equal(w._url, 'https://example.com/sub', '应当在原窗口跳转');
+    } finally { env.cleanup(); }
+  })();
 });
 test('★★ lockCascadeOnClose=true 时绝不清理模块 69 缓存', () => {
   // 实测 bug：重试循环每轮无条件 clearPoisonedCache(req,69)，
@@ -510,5 +514,17 @@ test('★ 去掉 UA 里的 Electron 标识（很多站点据此走降级分支�
     assert.ok(!/Electron/.test(ua), 'UA 里不该再有 Electron: ' + ua);
     assert.ok(!/AuraScreensaver/.test(ua), 'UA 里不该有我们的名字: ' + ua);
     assert.ok(/Mozilla/.test(ua), '应当仍是正常浏览器 UA: ' + ua);
+  } finally { env.cleanup(); }
+});
+test('★ 勾了「用系统浏览器」但机器上没有 Edge/Chrome：不崩、回退官方屏保', () => {
+  // 测试环境里必然找不到 Edge —— 正好验证「找不到就优雅回退」这条路径。
+  // 真实机器上会走 showWebExternal 拉起 msedge --kiosk。
+  const env = boot({
+    config: { screensaverEnabled: true, mode: 'web', web: { enabled: true, url: 'https://example.com', useSystemBrowser: true } },
+  });
+  try {
+    env.controller.onMessage({ url: ROUTE, data: { imageList: ['a.jpg'] } });
+    assert.equal(env.created.length, 0, '没找到系统浏览器就不该建内建窗口');
+    assert.equal(env.onMessageCalls.length, 1, '必须回退到官方屏保，不能什么都不显示');
   } finally { env.cleanup(); }
 });

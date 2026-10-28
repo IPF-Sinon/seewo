@@ -143,7 +143,7 @@
     //   而是弹出我们自己的全屏窗口加载 url。
     //   这样动画与版式完全由网页决定（CSS/JS/视频都行），
     //   不必去改官方渲染器里那 7 种写死的转场。
-    web: { enabled: false, url: '', closeOnClick: false },
+    web: { enabled: false, url: '', closeOnClick: false, useSystemBrowser: false },
     logLevel: 'info',
   };
 
@@ -204,6 +204,7 @@
       if (typeof cfg.web.enabled !== 'boolean') cfg.web.enabled = false;
       if (typeof cfg.web.url !== 'string') cfg.web.url = '';
       if (typeof cfg.web.closeOnClick !== 'boolean') cfg.web.closeOnClick = false;
+      if (typeof cfg.web.useSystemBrowser !== 'boolean') cfg.web.useSystemBrowser = false;
     }
     return cfg;
   }
@@ -491,7 +492,9 @@
           // ★ 网页屏保：开了就用网页替代官方图片屏保
           try {
             if (resolveMode(cfg) === 'web' && cfg.web && cfg.web.url) {
-              var wr = showWebWindow(cfg.web.url, cfg, log, state);
+              var wr = cfg.web.useSystemBrowser
+                ? showWebExternal(cfg.web.url, cfg, log, state)
+                : showWebWindow(cfg.web.url, cfg, log, state);
               if (wr && wr.ok) {
                 state.blocked++;
                 log.info('已用网页屏保替代官方屏保');
@@ -795,6 +798,16 @@
         try { state.webShortcut.unregister('CommandOrControl+Alt+Q'); } catch (e) { }
         state.webShortcut = null;
       }
+      // 系统浏览器模式：杀掉我们拉起来的进程（含子进程）
+      if (state && state.webProc) {
+        try { state.webProc.kill(); } catch (e) { }
+        try {
+          var cp2 = require('child_process');
+          cp2.spawn('taskkill.exe', ['/PID', String(state.webProc.pid), '/T', '/F'], { stdio: 'ignore' });
+        } catch (e) { }
+        state.webProc = null;
+        log.info('已关闭系统浏览器');
+      }
       if (state && state.webWin) {
         try { if (!state.webWin.isDestroyed()) state.webWin.close(); } catch (e) { }
         state.webWin = null;
@@ -970,6 +983,100 @@
         if (p3 && typeof p3.then === 'function') { p3.catch(function () { }); }
       } catch (e) { }
     });
+  }
+
+  /*
+   * ------------------------------------------------------------------ *
+   * 用系统浏览器当网页屏保
+   *   ★ 为什么不是「下载一个新内核」：
+   *     希沃自带的 Electron 22 对应 Chromium 108，太旧；
+   *     但 Windows 10 本身就装了 Microsoft Edge（Chromium 内核，且**自动更新**），
+   *     直接以 kiosk 模式调用它，内核永远是最新的 —— 不用下载任何东西。
+   *     （下载便携 Electron 也行，但 100+MB，而且版本还是会被时间淘汰。）
+   *   找不到 Edge 时再找 Chrome；都没有就回退到内置内核。
+   * ------------------------------------------------------------------ */
+
+  /** 找一个可用的系统浏览器；没有返回 null */
+  function findSystemBrowser() {
+    try {
+      var fsx = require('fs');
+      var pf86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+      var pf = process.env['ProgramFiles'] || 'C:\\Program Files';
+      var lad = process.env.LOCALAPPDATA || '';
+      var cands = [
+        pf86 + '\\Microsoft\\Edge\\Application\\msedge.exe',
+        pf + '\\Microsoft\\Edge\\Application\\msedge.exe',
+        pf + '\\Google\\Chrome\\Application\\chrome.exe',
+        pf86 + '\\Google\\Chrome\\Application\\chrome.exe'
+      ];
+      if (lad) { cands.push(lad + '\\Google\\Chrome\\Application\\chrome.exe'); }
+      var i;
+      for (i = 0; i < cands.length; i++) {
+        try { if (cands[i] && fsx.existsSync(cands[i])) return cands[i]; } catch (e) { }
+      }
+      // 兜底：让系统自己找
+      try {
+        var cp = require('child_process');
+        var names = ['msedge.exe', 'chrome.exe'];
+        for (i = 0; i < names.length; i++) {
+          var r = cp.spawnSync('where.exe', [names[i]], { encoding: 'utf8' });
+          var out = String((r && r.stdout) || '').split(/\r?\n/)[0].trim();
+          if (out && fsx.existsSync(out)) return out;
+        }
+      } catch (e) { }
+    } catch (e) { }
+    return null;
+  }
+
+  /** 用系统浏览器（kiosk 全屏）显示网页 */
+  function showWebExternal(url, cfg, log, state) {
+    var target = normalizeWebUrl(url);
+    if (!target) return { ok: false, reason: 'empty-url', message: '没有填网页地址或本地 HTML 路径' };
+
+    if (/^file:\/\//i.test(target)) {
+      try {
+        var fsx = require('fs');
+        var raw = decodeURI(target.replace(/^file:\/\//i, ''));
+        if (/^[A-Za-z]:/.test(raw)) { raw = raw.replace(/\//g, '\\'); }
+        if (!fsx.existsSync(raw)) { return { ok: false, reason: 'file-not-found', message: '这个文件不存在：' + raw }; }
+        if (fsx.statSync(raw).isDirectory()) { return { ok: false, reason: 'is-directory', message: '这是文件夹，不是网页文件：' + raw }; }
+      } catch (e) { }
+    }
+
+    try {
+      var exe = findSystemBrowser();
+      if (!exe) return { ok: false, reason: 'no-browser', message: '没找到 Edge 或 Chrome，无法用系统内核' };
+      var cp = require('child_process');
+      var fs2 = require('fs');
+
+      // 独立 profile：不污染用户自己的浏览记录/登录态
+      var profile = resolveDataFile(['seewo', 'AuraScreensaver', 'browser-profile']);
+      try { fs2.mkdirSync(profile, { recursive: true }); } catch (e) { }
+
+      closeWebWindow(state, log);   // 先收掉上一个（内建的或外部的）
+
+      var args = [
+        '--kiosk',
+        '--user-data-dir=' + profile,
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--disable-session-crashed-bubble',
+        '--edge-kiosk-type=fullscreen',   // Edge 专用；Chrome 会忽略未知参数
+        target
+      ];
+      var child = cp.spawn(exe, args, { detached: false, stdio: 'ignore' });
+      state.webProc = child;
+      try { child.on('exit', function () { if (state.webProc === child) { state.webProc = null; } }); } catch (e) { }
+
+      log.info('网页屏保已用系统浏览器打开（kiosk，内核为最新 Chromium）');
+      log.info('  浏览器: ' + exe);
+      log.info('  地址  : ' + target);
+      log.info('  退出  : 按 Alt+F4，或在界面点「关闭网页」');
+      return { ok: true, url: target, engine: 'system', browser: exe };
+    } catch (e) {
+      log.error('系统浏览器打开失败: ' + (e && e.message || e));
+      return { ok: false, reason: 'exception', message: String(e && e.message || e) };
+    }
   }
 
   function showWebWindow(url, cfg, log, state) {
@@ -1381,6 +1488,7 @@
 
     control.showWeb = function (a) {
       var u = (a && a.url) || (cfg.web && cfg.web.url) || '';
+      if (cfg.web && cfg.web.useSystemBrowser) { return showWebExternal(u, cfg, log, state); }
       return showWebWindow(u, cfg, log, state);
     };
 

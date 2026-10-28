@@ -131,7 +131,7 @@ try {
         } catch { }
     })
 } catch { }
-if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.15.0' }
+if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.16.0' }
 
 # ---------------------------------------------------------------------------
 # 管理员权限（写入 Program Files 必需）
@@ -196,7 +196,7 @@ function Get-DefaultConfig {
         lockCascadeOnClose = $false
         allowManualClose   = $true
         override           = $null
-        web                = [pscustomobject]@{ enabled = $false; url = ''; closeOnClick = $false }
+        web                = [pscustomobject]@{ enabled = $false; url = ''; closeOnClick = $false; useSystemBrowser = $false }
         mode               = 'none'
         logLevel           = 'info'
         backupCount        = 3
@@ -635,6 +635,22 @@ function Get-DiagnosticReport {
     }
     $lines += ''
 
+    # 网页内核：系统里有没有更新的 Edge/Chrome
+    $lines += '【网页内核】'
+    try {
+        $pf86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+        $pf = $env:ProgramFiles
+        $found = $null
+        foreach ($p in @((Join-Path $pf86 'Microsoft\Edge\Application\msedge.exe'),
+                        (Join-Path $pf 'Microsoft\Edge\Application\msedge.exe'),
+                        (Join-Path $pf 'Google\Chrome\Application\chrome.exe'))) {
+            if ($p -and -not $found -and (Test-Path -LiteralPath $p)) { $found = $p }
+        }
+        if ($found) { $lines += ('  找到系统浏览器: ' + $found) }
+        else { $lines += '  未找到 Edge/Chrome —— 只能用希沃内置内核（较旧）' }
+    } catch { $lines += '  检测失败' }
+    $lines += '  勾选「用系统浏览器」后走系统内核，新语法站点才会正常显示'
+    $lines += ''
     $lines += '【命令桥】'
     $lines += '  command.json：' + (Test-Path -LiteralPath $script:CommandPath)
     $lines += '  command-result.json：' + (Test-Path -LiteralPath $script:ResultPath)
@@ -1243,6 +1259,12 @@ $webPanel.WrapContents = $true
 $webPanel.Margin = New-Object System.Windows.Forms.Padding(0)
 
 
+$chkWebSys = New-Object System.Windows.Forms.CheckBox
+$chkWebSys.Text = '用系统浏览器（Edge/Chrome，新内核）'
+$chkWebSys.AutoSize = $true
+$chkWebSys.Margin = New-Object System.Windows.Forms.Padding(3, 6, 14, 4)
+$webPanel.Controls.Add($chkWebSys)
+
 $btnWebPick = New-Object System.Windows.Forms.Button
 $btnWebPick.Text = '选择网页文件…'
 $btnWebPick.AutoSize = $true
@@ -1267,6 +1289,7 @@ $txtWebUrl.Margin = New-Object System.Windows.Forms.Padding(3, 4, 3, 4)
 $table.Controls.Add($txtWebUrl)
 
 $toolTip.SetToolTip($webPanel, '用网页当屏保：勾选后集控下发的屏保会被替换成这个网页。' + $script:NL + '网页里的 CSS/JS/视频都能用，等于不受官方转场类型限制。' + $script:NL + '按 ESC 可退出全屏。')
+$toolTip.SetToolTip($chkWebSys, '勾上后用系统里的 Edge/Chrome 以全屏 kiosk 方式打开网页。' + $script:NL + '好处：内核始终是最新的（Windows 自带 Edge 会自动更新），能正常打开用新语法的站点 —— 希沃自带的内核太旧，那些站点会只显示一半。' + $script:NL + '退出：按 Alt+F4。')
 $toolTip.SetToolTip($txtWebUrl, '网址（https://…）或本地 HTML 文件路径，例如 D:\anim\show.html' + $script:NL + '本地路径会自动转成 file:///')
 
 # 素材来源：值看起来像路径时就地告警
@@ -1576,6 +1599,7 @@ function Update-ModeVisibility {
     $rbCover.Enabled = (-not $web)
     $txtTrans.Enabled = (-not $web)
 
+    $chkWebSys.Enabled = $web
     $btnWebPick.Enabled = $web
     $txtWebUrl.Enabled = $web
 
@@ -1601,6 +1625,7 @@ function Fill-Form {
     $rbModeNone.Checked = ($m -eq 'none')
 
     if ($null -ne $Cfg.web -and $null -ne $Cfg.web.url) { $txtWebUrl.Text = [string]$Cfg.web.url } else { $txtWebUrl.Text = '' }
+    $chkWebSys.Checked = ($null -ne $Cfg.web -and $Cfg.web.useSystemBrowser -eq $true)
 
     if ($null -ne $ov) {
         if ($null -ne $ov.materialSource) { $txtSource.Text = [string]$ov.materialSource } else { $txtSource.Text = '' }
@@ -1700,7 +1725,7 @@ function Build-Config {
         allowManualClose = $true
         mode = $mode
         override = $ov
-        web = [pscustomobject]@{ enabled = ($mode -eq 'web'); url = (Normalize-WebInput -Raw $txtWebUrl.Text); closeOnClick = $false }
+        web = [pscustomobject]@{ enabled = ($mode -eq 'web'); url = (Normalize-WebInput -Raw $txtWebUrl.Text); closeOnClick = $false; useSystemBrowser = [bool]$chkWebSys.Checked }
         logLevel = 'info'
         backupCount = 3
     }
