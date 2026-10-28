@@ -1117,19 +1117,55 @@
       //   所以这里在希沃的 Electron 主进程里注册**全局**快捷键 ——
       //   即使焦点在外部的 Chrome 上，按键也先到我们这里，可以杀掉那个进程。
       //   （不加这个，用户就只能 Alt+F4，很不好用。）
+      // ★ 全局快捷键不一定注册得上（可能被别的程序占用；Electron 的 register
+      //   会返回 false 而我之前没检查，所以那条「已注册」日志可能是假的）。
+      //   这里如实记录，并生成一个**不依赖快捷键**的保底出口。
+      var hotOk = [];
       try {
         var elg = getElectronModule();
         var gs = elg && elg.globalShortcut;
         if (gs) {
           state.webShortcut = gs;
-          try { gs.register('Escape', function () { closeWebWindow(state, log); }); } catch (e) { }
-          try { gs.register('CommandOrControl+Alt+Q', function () { closeWebWindow(state, log); }); } catch (e) { }
-          log.info('已注册退出快捷键：ESC 或 Ctrl+Alt+Q（备用 Alt+F4）');
-        } else {
-          log.warn('拿不到 globalShortcut，系统浏览器模式只能按 Alt+F4 退出');
+          var accs = ['Escape', 'CommandOrControl+Alt+Q', 'CommandOrControl+Shift+Q'];
+          for (var ai = 0; ai < accs.length; ai++) {
+            try {
+              if (gs.register(accs[ai], function () { closeWebWindow(state, log); })) { hotOk.push(accs[ai]); }
+            } catch (e) { }
+          }
         }
       } catch (e) { }
 
+      // 保底出口：把 PID 写出来，桌面放一个双击即退出的批处理
+      var pidFile = null;
+      try {
+        pidFile = resolveDataFile(['seewo', 'AuraScreensaver', 'web-browser.pid']);
+        fs2.writeFileSync(pidFile, String(child.pid), 'utf8');
+      } catch (e) { }
+      try {
+        var desk = process.env.USERPROFILE ? (process.env.USERPROFILE + '\\Desktop') : null;
+        if (desk && fs2.existsSync(desk) && pidFile) {
+          var bat = desk + '\\退出网页屏保.bat';
+          var bl = [
+            '@echo off',
+            'chcp 65001 >nul 2>nul',
+            'set PF=' + pidFile,
+            'if not exist "%PF%" (echo 当前没有正在运行的网页屏保。& pause & exit /b)',
+            'set /p PID=<"%PF%"',
+            'echo 正在关闭网页屏保 (PID %PID%) ...',
+            'taskkill /PID %PID% /T /F',
+            'del "%PF%" >nul 2>nul',
+            'echo 完成。',
+            'pause'
+          ];
+          try { fs2.writeFileSync(bat, bl.join('\r\n'), 'utf8'); } catch (e) { }
+        }
+      } catch (e) { }
+
+      if (hotOk.length) {
+        log.info('已注册退出快捷键: ' + hotOk.join(' / ') + '（另有 Alt+F4，以及桌面「退出网页屏保.bat」）');
+      } else {
+        log.warn('全局快捷键没注册上（可能被别的程序占用）—— 请按 Alt+F4，或双击桌面「退出网页屏保.bat」');
+      }
       try {
         child.on('exit', function () {
           if (state.webProc === child) { state.webProc = null; }

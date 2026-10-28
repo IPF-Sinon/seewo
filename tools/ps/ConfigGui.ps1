@@ -131,7 +131,7 @@ try {
         } catch { }
     })
 } catch { }
-if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.18.0' }
+if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.19.0' }
 
 # ---------------------------------------------------------------------------
 # 管理员权限（写入 Program Files 必需）
@@ -523,7 +523,9 @@ function Get-FieldHelpText {
     $L += '  （点「选择网页文件…」挑一个；或只写 bing.com，会自动补上 https://）。'
     $L += '  （例：D:\anim\show.html，会自动转成 file:///）。'
     $L += '  改完地址点「保存配置」，再点「预览屏保」即可马上看效果；'
-    $L += '  屏保起来后，右下角有「退出屏保」按钮，也可以按 ESC。'
+    $L += '  用内置内核时：屏保右下角有「退出屏保」按钮，也可以按 ESC。'
+    $L += '  用系统浏览器时：按 ESC / Ctrl+Alt+Q，或 Alt+F4；'
+    $L += '  注册不上快捷键时，双击桌面「退出网页屏保.bat」一定能退出。'
     $L += '  若网页加载失败，会自动回退到官方图片屏保，不会黑屏卡住。'
     $L += ''
     $L += '【预览】'
