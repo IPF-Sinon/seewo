@@ -996,35 +996,81 @@
    *   找不到 Edge 时再找 Chrome；都没有就回退到内置内核。
    * ------------------------------------------------------------------ */
 
-  /** 找一个可用的系统浏览器；没有返回 null */
-  function findSystemBrowser() {
+  /** 找一个可用的系统浏览器；找不到返回 null。cfg.web.browserPath 优先。 */
+  function findSystemBrowser(cfg, log) {
+    var fsx = null, cp = null;
+    try { fsx = require('fs'); } catch (e) { return null; }
+    try { cp = require('child_process'); } catch (e) { }
+    var checked = [];
+
+    // 0) 用户在界面里手动指定的，优先级最高
     try {
-      var fsx = require('fs');
-      var pf86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
-      var pf = process.env['ProgramFiles'] || 'C:\\Program Files';
-      var lad = process.env.LOCALAPPDATA || '';
-      var cands = [
-        pf86 + '\\Microsoft\\Edge\\Application\\msedge.exe',
-        pf + '\\Microsoft\\Edge\\Application\\msedge.exe',
-        pf + '\\Google\\Chrome\\Application\\chrome.exe',
-        pf86 + '\\Google\\Chrome\\Application\\chrome.exe'
-      ];
-      if (lad) { cands.push(lad + '\\Google\\Chrome\\Application\\chrome.exe'); }
-      var i;
-      for (i = 0; i < cands.length; i++) {
-        try { if (cands[i] && fsx.existsSync(cands[i])) return cands[i]; } catch (e) { }
+      var manual = cfg && cfg.web && cfg.web.browserPath;
+      if (manual && typeof manual === 'string' && manual) {
+        if (fsx.existsSync(manual)) { log.info('使用手动指定的浏览器: ' + manual); return manual; }
+        log.warn('手动指定的浏览器不存在，继续自动查找: ' + manual);
       }
-      // 兜底：让系统自己找
-      try {
-        var cp = require('child_process');
-        var names = ['msedge.exe', 'chrome.exe'];
-        for (i = 0; i < names.length; i++) {
-          var r = cp.spawnSync('where.exe', [names[i]], { encoding: 'utf8' });
-          var out = String((r && r.stdout) || '').split(/\r?\n/)[0].trim();
-          if (out && fsx.existsSync(out)) return out;
-        }
-      } catch (e) { }
     } catch (e) { }
+
+    // 1) 常见安装路径（Edge 也可能装在 LocalAppData 下）
+    var roots = [];
+    try {
+      roots.push(process.env['ProgramFiles(x86)']);
+      roots.push(process.env['ProgramFiles']);
+      roots.push(process.env['LOCALAPPDATA']);
+    } catch (e) { }
+    var rels = [
+      'Microsoft\\Edge\\Application\\msedge.exe',
+      'Google\\Chrome\\Application\\chrome.exe'
+    ];
+    var i, j, p;
+    for (i = 0; i < roots.length; i++) {
+      if (!roots[i]) { continue; }
+      for (j = 0; j < rels.length; j++) {
+        p = roots[i] + '\\' + rels[j];
+        checked.push(p);
+        try { if (fsx.existsSync(p)) { log.info('找到系统浏览器: ' + p); return p; } } catch (e) { }
+      }
+    }
+
+    // 2) 注册表 App Paths —— Windows 自己解析命令用的就是这里，最可靠
+    if (cp) {
+      var names = ['msedge.exe', 'chrome.exe'];
+      var hives = ['HKLM', 'HKCU'];
+      for (i = 0; i < names.length; i++) {
+        for (j = 0; j < hives.length; j++) {
+          try {
+            var r = cp.spawnSync('reg.exe', ['query',
+              hives[j] + '\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\' + names[i], '/ve'],
+              { encoding: 'utf8' });
+            var out = String((r && r.stdout) || '');
+            var m = out.match(/REG_SZ\s+(.+?)\s*$/m);
+            if (m) {
+              var cand = m[1].replace(/^"|"$/g, '').trim();
+              checked.push('注册表: ' + cand);
+              if (cand && fsx.existsSync(cand)) { log.info('从注册表找到系统浏览器: ' + cand); return cand; }
+            }
+          } catch (e) { }
+        }
+      }
+
+      // 3) where.exe 兜底
+      for (i = 0; i < names.length; i++) {
+        try {
+          var r2 = cp.spawnSync('where.exe', [names[i]], { encoding: 'utf8' });
+          var o2 = String((r2 && r2.stdout) || '').split(/\r?\n/)[0].trim();
+          if (o2) {
+            checked.push('where: ' + o2);
+            if (fsx.existsSync(o2)) { log.info('where.exe 找到: ' + o2); return o2; }
+          }
+        } catch (e) { }
+      }
+    }
+
+    // 全失败：把「查过哪些路径」写清楚，方便定位，也提示可以手动指定
+    log.warn('没找到 Edge/Chrome。下面这些路径都试过了，都不存在：');
+    for (i = 0; i < checked.length && i < 20; i++) { log.warn('    ' + checked[i]); }
+    log.warn('可以点界面上的「手动选择浏览器…」直接指定一个 exe');
     return null;
   }
 
@@ -1044,7 +1090,7 @@
     }
 
     try {
-      var exe = findSystemBrowser();
+      var exe = findSystemBrowser(cfg, log);
       if (!exe) return { ok: false, reason: 'no-browser', message: '没找到 Edge 或 Chrome，无法用系统内核' };
       var cp = require('child_process');
       var fs2 = require('fs');

@@ -131,7 +131,7 @@ try {
         } catch { }
     })
 } catch { }
-if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.16.0' }
+if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.17.0' }
 
 # ---------------------------------------------------------------------------
 # 管理员权限（写入 Program Files 必需）
@@ -196,7 +196,7 @@ function Get-DefaultConfig {
         lockCascadeOnClose = $false
         allowManualClose   = $true
         override           = $null
-        web                = [pscustomobject]@{ enabled = $false; url = ''; closeOnClick = $false; useSystemBrowser = $false }
+        web                = [pscustomobject]@{ enabled = $false; url = ''; closeOnClick = $false; useSystemBrowser = $false; browserPath = '' }
         mode               = 'none'
         logLevel           = 'info'
         backupCount        = 3
@@ -1265,6 +1265,11 @@ $chkWebSys.AutoSize = $true
 $chkWebSys.Margin = New-Object System.Windows.Forms.Padding(3, 6, 14, 4)
 $webPanel.Controls.Add($chkWebSys)
 
+$btnWebBrowser = New-Object System.Windows.Forms.Button
+$btnWebBrowser.Text = '手动选择浏览器…'
+$btnWebBrowser.AutoSize = $true
+$btnWebBrowser.Margin = New-Object System.Windows.Forms.Padding(0, 2, 6, 2)
+$webPanel.Controls.Add($btnWebBrowser)
 $btnWebPick = New-Object System.Windows.Forms.Button
 $btnWebPick.Text = '选择网页文件…'
 $btnWebPick.AutoSize = $true
@@ -1288,8 +1293,24 @@ $txtWebUrl.Anchor = 'Left,Right'
 $txtWebUrl.Margin = New-Object System.Windows.Forms.Padding(3, 4, 3, 4)
 $table.Controls.Add($txtWebUrl)
 
+$lblRBrowser = New-AuraRowLabel '浏览器路径（可选）'
+$table.Controls.Add($lblRBrowser)
+$txtWebBrowser = New-Object System.Windows.Forms.TextBox
+$txtWebBrowser.Anchor = 'Left,Right'
+$txtWebBrowser.Margin = New-Object System.Windows.Forms.Padding(3, 4, 3, 4)
+$table.Controls.Add($txtWebBrowser)
+
+$lblBrowserHint = New-Object System.Windows.Forms.Label
+$lblBrowserHint.AutoSize = $true
+$lblBrowserHint.ForeColor = [System.Drawing.Color]::DimGray
+$lblBrowserHint.Margin = New-Object System.Windows.Forms.Padding(3, 0, 3, 4)
+$lblBrowserHint.Text = '留空 = 自动查找 Edge/Chrome。自动找不到时点上面的按钮手动指定 msedge.exe'
+$table.Controls.Add($lblBrowserHint)
+$table.SetColumnSpan($lblBrowserHint, 2)
+
 $toolTip.SetToolTip($webPanel, '用网页当屏保：勾选后集控下发的屏保会被替换成这个网页。' + $script:NL + '网页里的 CSS/JS/视频都能用，等于不受官方转场类型限制。' + $script:NL + '按 ESC 可退出全屏。')
 $toolTip.SetToolTip($chkWebSys, '勾上后用系统里的 Edge/Chrome 以全屏 kiosk 方式打开网页。' + $script:NL + '好处：内核始终是最新的（Windows 自带 Edge 会自动更新），能正常打开用新语法的站点 —— 希沃自带的内核太旧，那些站点会只显示一半。' + $script:NL + '退出：按 Alt+F4。')
+$toolTip.SetToolTip($txtWebBrowser, '自动找不到 Edge/Chrome 时，这里手动指定一个浏览器 exe。' + $script:NL + '点上面的按钮选 msedge.exe 或 chrome.exe 即可；留空则自动查找。')
 $toolTip.SetToolTip($txtWebUrl, '网址（https://…）或本地 HTML 文件路径，例如 D:\anim\show.html' + $script:NL + '本地路径会自动转成 file:///')
 
 # 素材来源：值看起来像路径时就地告警
@@ -1563,7 +1584,7 @@ $script:ImgOnlyCtrls = @($lblR1, $txtSource, $lblSourceWarn, $lblR4, $imgPanel, 
 #   显示参数 —— 对集控图也生效，所以「不修改图片」模式下照样能调
 $script:ParamCtrls = @($lblR2, $numInterval, $lblR3, $flowFit, $lblR6, $transPanel, $lblTransHint)
 #   网页 —— 只有「网页屏保」显示
-$script:WebRowCtrls = @($lblR7, $webPanel, $lblWebHint, $lblR8, $txtWebUrl)
+$script:WebRowCtrls = @($lblR7, $webPanel, $lblWebHint, $lblR8, $txtWebUrl, $lblRBrowser, $txtWebBrowser, $lblBrowserHint)
 
 # 网页地址归一化：没写协议的自动补 https://
 #   已经是 http/https/file 或本地路径（盘符/UNC/POSIX/相对）的一律不动。
@@ -1600,6 +1621,8 @@ function Update-ModeVisibility {
     $txtTrans.Enabled = (-not $web)
 
     $chkWebSys.Enabled = $web
+    $btnWebBrowser.Enabled = $web
+    $txtWebBrowser.Enabled = $web
     $btnWebPick.Enabled = $web
     $txtWebUrl.Enabled = $web
 
@@ -1626,6 +1649,7 @@ function Fill-Form {
 
     if ($null -ne $Cfg.web -and $null -ne $Cfg.web.url) { $txtWebUrl.Text = [string]$Cfg.web.url } else { $txtWebUrl.Text = '' }
     $chkWebSys.Checked = ($null -ne $Cfg.web -and $Cfg.web.useSystemBrowser -eq $true)
+    if ($null -ne $Cfg.web -and $null -ne $Cfg.web.browserPath) { $txtWebBrowser.Text = [string]$Cfg.web.browserPath } else { $txtWebBrowser.Text = '' }
 
     if ($null -ne $ov) {
         if ($null -ne $ov.materialSource) { $txtSource.Text = [string]$ov.materialSource } else { $txtSource.Text = '' }
@@ -1725,7 +1749,7 @@ function Build-Config {
         allowManualClose = $true
         mode = $mode
         override = $ov
-        web = [pscustomobject]@{ enabled = ($mode -eq 'web'); url = (Normalize-WebInput -Raw $txtWebUrl.Text); closeOnClick = $false; useSystemBrowser = [bool]$chkWebSys.Checked }
+        web = [pscustomobject]@{ enabled = ($mode -eq 'web'); url = (Normalize-WebInput -Raw $txtWebUrl.Text); closeOnClick = $false; useSystemBrowser = [bool]$chkWebSys.Checked; browserPath = $txtWebBrowser.Text.Trim() }
         logLevel = 'info'
         backupCount = 3
     }
@@ -2975,6 +2999,22 @@ $btnTransRandom.add_Click({
 })
 $btnTransClear.add_Click({ $txtTrans.Text = '' })
 
+# 手动指定浏览器 exe（自动找不到 Edge/Chrome 时用）
+$btnWebBrowser.add_Click({
+    try {
+        $of = New-Object System.Windows.Forms.OpenFileDialog
+        $of.Multiselect = $false
+        $of.Title = '选择浏览器程序（msedge.exe 或 chrome.exe）'
+        $of.Filter = '浏览器程序|msedge.exe;chrome.exe|可执行文件|*.exe|所有文件|*.*'
+        $cur = $txtWebBrowser.Text.Trim()
+        if ($cur -ne '' -and (Test-Path -LiteralPath (Split-Path -Parent $cur))) { $of.InitialDirectory = (Split-Path -Parent $cur) }
+        if ($of.ShowDialog() -ne 'OK') { return }
+        $txtWebBrowser.Text = $of.FileName
+        Set-Status ('已指定浏览器: ' + $of.FileName)
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, '选择失败', 'OK', 'Warning') | Out-Null
+    }
+})
 # 选择本地网页文件
 $btnWebPick.add_Click({
     try {
