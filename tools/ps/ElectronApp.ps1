@@ -41,7 +41,7 @@ function Get-AuraKernelInfo {
 
 function Get-AuraKernelLatestVersion {
     $api = 'https://api.github.com/repos/electron/electron/releases/latest'
-    foreach ($u in @($api, ($script:AuraKernelProxy + $api))) {
+    foreach ($u in @($api, ('https://gh-proxy.com/' + $api), ('https://gh-proxy.org/' + $api))) {
         try {
             $r = Invoke-RestMethod -Uri $u -TimeoutSec 15 -Headers @{ 'User-Agent' = 'AuraScreensaver' }
             if ($r -and $r.tag_name) { return ([string]$r.tag_name).TrimStart('v') }
@@ -54,7 +54,8 @@ function Get-AuraKernelDownloadUrls {
     param([string]$Version)
     $name = 'electron-v' + $Version + '-win32-x64.zip'
     $direct = 'https://github.com/electron/electron/releases/download/v' + $Version + '/' + $name
-    return @($direct, ($script:AuraKernelProxy + $direct))
+    # 站点更新日志提到业务域名已统一到 gh-proxy.org，两个都留作回退
+    return @($direct, ('https://gh-proxy.com/' + $direct), ('https://gh-proxy.org/' + $direct))
 }
 
 # 把包装程序（main.js / package.json）写进内核目录
@@ -119,8 +120,23 @@ function Start-AuraKernelDownload {
         try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
         $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('aura-kernel-' + [guid]::NewGuid().ToString('N') + '.zip')
         $err = ''
+        # 把临时文件路径和目标大小写出来，界面靠这两个文件画进度条
+        try { [System.IO.File]::WriteAllText((Join-Path $Dir 'download.path'), $tmp) } catch { }
         foreach ($u in $Urls) {
             try {
+                # 先探总大小（HEAD），拿不到就退化成不确定进度
+                $total = 0
+                try {
+                    $hreq = [System.Net.HttpWebRequest]::Create($u)
+                    $hreq.Method = 'HEAD'
+                    $hreq.Timeout = 20000
+                    $hreq.UserAgent = 'AuraScreensaver'
+                    $hresp = $hreq.GetResponse()
+                    $total = [int64]$hresp.ContentLength
+                    $hresp.Close()
+                } catch { $total = 0 }
+                try { [System.IO.File]::WriteAllText((Join-Path $Dir 'download.total'), [string]$total) } catch { }
+
                 $wc = New-Object System.Net.WebClient
                 $wc.Headers.Add('User-Agent', 'AuraScreensaver')
                 Write-Output ('正在下载: ' + $u)
@@ -133,6 +149,8 @@ function Start-AuraKernelDownload {
                 $enc = New-Object System.Text.UTF8Encoding($false)
                 [System.IO.File]::WriteAllText((Join-Path $Dir 'version.txt'), $Version, $enc)
                 Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+                try { Remove-Item -LiteralPath (Join-Path $Dir 'download.path') -Force -ErrorAction SilentlyContinue } catch { }
+                try { Remove-Item -LiteralPath (Join-Path $Dir 'download.total') -Force -ErrorAction SilentlyContinue } catch { }
                 return @{ Ok = $true; Err = ''; Version = $Version }
             } catch { $err = $_.Exception.Message }
         }

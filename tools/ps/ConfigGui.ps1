@@ -43,8 +43,10 @@ $script:ConfigDir   = Join-Path $env:APPDATA (Join-Path 'seewo' 'AuraScreensaver
 $script:ConfigPath  = Join-Path $script:ConfigDir 'config.json'
 $script:CommandPath = Join-Path $script:ConfigDir 'command.json'
 $script:ResultPath  = Join-Path $script:ConfigDir 'command-result.json'
-$script:LogPath     = Join-Path $script:ConfigDir 'aura-screensaver.log'
+$script:LogDir      = Join-Path $script:ConfigDir 'logs'
+$script:LogPath     = Join-Path $script:LogDir 'aura-screensaver.log'
 $script:Utf8NoBom   = New-Object System.Text.UTF8Encoding($false)
+try { if (-not (Test-Path -LiteralPath $script:LogDir)) { New-Item -ItemType Directory -Path $script:LogDir -Force | Out-Null } } catch { }
 $script:HostNames   = @('SeewoServiceAssistant')
 
 # ---------------------------------------------------------------------------
@@ -125,13 +127,13 @@ try {
     [System.Windows.Forms.Application]::add_ThreadException({
         param($sender, $e)
         try {
-            $p = Join-Path $script:ConfigDir 'ui-error.log'
+            $p = Join-Path $script:LogDir 'ui-error.log'
             $txt = ('[' + (Get-Date).ToString('s') + '] ' + $e.Exception.ToString() + [Environment]::NewLine)
             [System.IO.File]::AppendAllText($p, $txt, (New-Object System.Text.UTF8Encoding($false)))
         } catch { }
     })
 } catch { }
-if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.22.0' }
+if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.23.0' }
 
 # ---------------------------------------------------------------------------
 # 管理员权限（写入 Program Files 必需）
@@ -960,7 +962,7 @@ $btnUninstall.Size = New-Object System.Drawing.Size(140, 38)
 $flowBottom.Controls.Add($btnUninstall)
 
 $linkLog = New-Object System.Windows.Forms.LinkLabel
-$linkLog.Text = '日志'
+$linkLog.Text = '日志目录'
 $linkLog.AutoSize = $true
 $linkLog.Margin = New-Object System.Windows.Forms.Padding(10, 12, 3, 3)
 $flowBottom.Controls.Add($linkLog)
@@ -1318,12 +1320,46 @@ $txtWebBrowser.Margin = New-Object System.Windows.Forms.Padding(3, 4, 3, 4)
 $table.Controls.Add($txtWebBrowser)
 
 
+
+$lblNoneHint = New-Object System.Windows.Forms.Label
+$lblNoneHint.AutoSize = $true
+$lblNoneHint.ForeColor = [System.Drawing.Color]::DimGray
+$lblNoneHint.Margin = New-Object System.Windows.Forms.Padding(3, 0, 3, 4)
+$lblNoneHint.Text = '不修改图片：屏保仍用集控下发的图，上面的切换间隔/适配/转场依然生效。'
+$table.Controls.Add($lblNoneHint)
+$table.SetColumnSpan($lblNoneHint, 2)
+
+$flowNone = New-Object System.Windows.Forms.FlowLayoutPanel
+$flowNone.AutoSize = $true
+$flowNone.WrapContents = $true
+$flowNone.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 4)
+$btnOpenDefaultDir = New-Object System.Windows.Forms.Button
+$btnOpenDefaultDir.Text = '打开默认图片目录'
+$btnOpenDefaultDir.AutoSize = $true
+$btnOpenDefaultDir.Margin = New-Object System.Windows.Forms.Padding(0, 2, 6, 2)
+$flowNone.Controls.Add($btnOpenDefaultDir)
+$btnViewDefault = New-Object System.Windows.Forms.Button
+$btnViewDefault.Text = '查看默认图片'
+$btnViewDefault.AutoSize = $true
+$btnViewDefault.Margin = New-Object System.Windows.Forms.Padding(0, 2, 6, 2)
+$flowNone.Controls.Add($btnViewDefault)
+$table.Controls.Add($flowNone)
+$table.SetColumnSpan($flowNone, 2)
 $lblKernelStatus = New-Object System.Windows.Forms.Label
 $lblKernelStatus.AutoSize = $true
 $lblKernelStatus.ForeColor = [System.Drawing.Color]::DimGray
 $lblKernelStatus.Margin = New-Object System.Windows.Forms.Padding(3, 0, 3, 4)
 $lblKernelStatus.Text = '新内核：检查中…'
 $table.Controls.Add($lblKernelStatus)
+$barKernel = New-Object System.Windows.Forms.ProgressBar
+$barKernel.Minimum = 0
+$barKernel.Maximum = 100
+$barKernel.Value = 0
+$barKernel.Width = 260
+$barKernel.Height = 14
+$barKernel.Margin = New-Object System.Windows.Forms.Padding(3, 2, 3, 4)
+$table.Controls.Add($barKernel)
+$table.SetColumnSpan($barKernel, 2)
 $table.SetColumnSpan($lblKernelStatus, 2)
 $lblBrowserHint = New-Object System.Windows.Forms.Label
 $lblBrowserHint.AutoSize = $true
@@ -1610,6 +1646,7 @@ $script:ImgOnlyCtrls = @($lblR1, $txtSource, $lblSourceWarn, $lblR4, $imgPanel, 
 $script:ParamCtrls = @($lblR2, $numInterval, $lblR3, $flowFit, $lblR6, $transPanel, $lblTransHint)
 #   网页 —— 只有「网页屏保」显示
 $script:WebRowCtrls = @($lblR7, $webPanel, $lblWebHint, $lblR8, $txtWebUrl, $lblRBrowser, $txtWebBrowser, $lblBrowserHint)
+$script:NoneRowCtrls = @($lblNoneHint, $flowNone)
 
 # 网页地址归一化：没写协议的自动补 https://
 #   已经是 http/https/file 或本地路径（盘符/UNC/POSIX/相对）的一律不动。
@@ -1635,6 +1672,7 @@ function Update-ModeVisibility {
     # 显示参数：网页模式下由网页自己决定一切，所以隐藏；其它模式都显示
     foreach ($c in $script:ParamCtrls) { if ($null -ne $c) { $c.Visible = (-not $web) } }
     foreach ($c in $script:WebRowCtrls) { if ($null -ne $c) { $c.Visible = $web } }
+    foreach ($c in $script:NoneRowCtrls) { if ($null -ne $c) { $c.Visible = (-not $img -and -not $web) } }
 
     $txtSource.Enabled = $img
     $txtImages.Enabled = $img
@@ -1882,7 +1920,7 @@ function Refresh-UiState {
 # 诊断日志（安装失败时把详细原因写文件，方便排查）
 # ---------------------------------------------------------------------------
 
-$script:LogDir = $script:ConfigDir
+$script:LogDir = Join-Path $script:ConfigDir 'logs'
 $script:InstallLog = $null
 $script:ExeLog = $null
 
@@ -2262,7 +2300,7 @@ function Invoke-SafeModeAutoAction {
         [System.IO.File]::WriteAllText($lock, (Get-Date).ToString('o'), $script:Utf8NoBom)
     } catch { }
 
-    $script:InstallLog = Join-Path $script:ConfigDir 'install.log'
+    $script:InstallLog = Join-Path $script:LogDir 'install.log'
     $script:ExeLog = $null
     Add-Log ('==== 安全模式自动' + $Action + ' 开始 ====')
 
@@ -3050,10 +3088,33 @@ $script:KernelTimer.add_Tick({
     try {
         if (-not $script:KernelJobId) { $script:KernelTimer.Stop(); return }
         $j = Get-Job -Id $script:KernelJobId -ErrorAction SilentlyContinue
-        if (-not $j) { $script:KernelTimer.Stop(); $btnKernel.Enabled = $true; return }
+        if (-not $j) { $script:KernelTimer.Stop(); $btnKernel.Enabled = $true; $barKernel.Value = 0; return }
         if ($j.State -eq 'Running') {
+            # 进度：后台任务把「临时文件路径」和「总大小」写在 kdir 下
             $o = Receive-Job -Job $j -Keep 2>$null | Select-Object -Last 1
             if ($o) { $lblKernelStatus.Text = '新内核：' + [string]$o }
+            try {
+                $kd = Get-AuraKernelDir
+                $pf = Join-Path $kd 'download.path'
+                $tf = Join-Path $kd 'download.total'
+                if (Test-Path -LiteralPath $pf) {
+                    $tmpPath = ([System.IO.File]::ReadAllText($pf)).Trim()
+                    $total = 0
+                    if (Test-Path -LiteralPath $tf) { [int64]::TryParse(([System.IO.File]::ReadAllText($tf)).Trim(), [ref]$total) | Out-Null }
+                    $cur = 0
+                    if ($tmpPath -and (Test-Path -LiteralPath $tmpPath)) { $cur = (Get-Item -LiteralPath $tmpPath).Length }
+                    if ($total -gt 0) {
+                        $pct = [int][math]::Min(100, [math]::Floor($cur * 100 / $total))
+                        if ($pct -lt 0) { $pct = 0 }
+                        $barKernel.Style = 'Blocks'
+                        $barKernel.Value = $pct
+                        $lblKernelStatus.Text = ('新内核：下载中 ' + $pct + '%（' + [math]::Round($cur/1MB,1) + ' / ' + [math]::Round($total/1MB,1) + ' MB）')
+                    } else {
+                        $barKernel.Style = 'Marquee'
+                        $lblKernelStatus.Text = ('新内核：下载中 ' + [math]::Round($cur/1MB,1) + ' MB')
+                    }
+                }
+            } catch { }
             return
         }
         $script:KernelTimer.Stop()
@@ -3061,15 +3122,18 @@ $script:KernelTimer.add_Tick({
         Remove-Job -Job $j -Force -ErrorAction SilentlyContinue
         $script:KernelJobId = $null
         $btnKernel.Enabled = $true
+        $barKernel.Style = 'Blocks'
         $r = $res | Where-Object { $_ -is [hashtable] } | Select-Object -Last 1
         if ($r -and $r.Ok) {
             Add-Log ('新内核下载完成 v' + $r.Version)
+            $barKernel.Value = 100
             Update-AuraKernelStatus
             [System.Windows.Forms.MessageBox]::Show('新内核已下载完成。现在可以勾选「用新内核」了。', '完成', 'OK', 'Information') | Out-Null
         } else {
             $msg = ''
             if ($r) { $msg = [string]$r.Err }
             Add-Log ('新内核下载失败: ' + $msg)
+            $barKernel.Value = 0
             $lblKernelStatus.Text = '新内核：下载失败'
             [System.Windows.Forms.MessageBox]::Show(('下载失败：' + $msg + $script:NL + $script:NL + '可以稍后重试。'), '下载失败', 'OK', 'Warning') | Out-Null
         }
@@ -3091,13 +3155,123 @@ $btnKernel.add_Click({
         $lblKernelStatus.Text = '新内核：正在获取版本号…'
         [System.Windows.Forms.Application]::DoEvents()
         Start-AuraKernelDownload | Out-Null
-        $lblKernelStatus.Text = '新内核：下载中…（请耐心等待）'
+        $barKernel.Style = 'Marquee'
+        $barKernel.Value = 0
+        $lblKernelStatus.Text = '新内核：正在连接…'
         $script:KernelTimer.Start()
     } catch {
         $btnKernel.Enabled = $true
         $lblKernelStatus.Text = '新内核：启动失败'
         Add-Log ('启动内核下载失败: ' + $_.Exception.Message)
         [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, '下载失败', 'OK', 'Warning') | Out-Null
+    }
+})
+
+
+function Get-SeewoDefaultImageDir {
+    if (-not $env:APPDATA) { return $null }
+    return (Join-Path $env:APPDATA (Join-Path 'seewo' (Join-Path 'SeewoAbility' 'screen_saver')))
+}
+
+function Get-SeewoDefaultImages {
+    $d = Get-SeewoDefaultImageDir
+    if (-not $d -or -not (Test-Path -LiteralPath $d)) { return @() }
+    return @(Get-ChildItem -LiteralPath $d -File -ErrorAction SilentlyContinue |
+             Where-Object { $_.Length -gt 0 } | Sort-Object Name)
+}
+
+# 「查看默认图片」：列表 + 预览 + 打开目录
+$btnViewDefault.add_Click({
+    try {
+        $imgs = Get-SeewoDefaultImages
+        $dd = Get-SeewoDefaultImageDir
+        if ($imgs.Count -eq 0) {
+            [System.Windows.Forms.MessageBox]::Show(
+                ('还没有默认图片。' + $script:NL + $script:NL +
+                 '目录：' + $dd + $script:NL + $script:NL +
+                 '通常在你用希沃账号登录、集控下发过屏保图片之后才会有。'),
+                '暂无图片', 'OK', 'Information') | Out-Null
+            return
+        }
+        $dlg = New-Object System.Windows.Forms.Form
+        $dlg.Text = ('默认图片（' + $imgs.Count + ' 张）—— 双击查看大图')
+        $dlg.Size = New-Object System.Drawing.Size(820, 500)
+        $dlg.StartPosition = 'CenterParent'
+        $dlg.Font = $form.Font
+        $dlg.MinimumSize = New-Object System.Drawing.Size(560, 360)
+
+        $split = New-Object System.Windows.Forms.SplitContainer
+        $split.Dock = 'Fill'
+        $split.SplitterDistance = 300
+        $dlg.Controls.Add($split)
+
+        $lst = New-Object System.Windows.Forms.ListBox
+        $lst.Dock = 'Fill'
+        foreach ($i in $imgs) {
+            [void]$lst.Items.Add(($i.Name.Substring(0, [Math]::Min(24, $i.Name.Length)) + '  ' + [math]::Round($i.Length / 1KB, 1) + ' KB'))
+        }
+        $split.Panel1.Controls.Add($lst)
+
+        $pic = New-Object System.Windows.Forms.PictureBox
+        $pic.Dock = 'Fill'
+        $pic.SizeMode = 'Zoom'
+        $pic.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
+        $split.Panel2.Controls.Add($pic)
+
+        $bar = New-Object System.Windows.Forms.FlowLayoutPanel
+        $bar.Dock = 'Bottom'
+        $bar.Height = 46
+        $bar.FlowDirection = 'RightToLeft'
+        $dlg.Controls.Add($bar)
+        $btnO = New-Object System.Windows.Forms.Button
+        $btnO.Text = '打开目录'
+        $btnO.AutoSize = $true
+        [void]$bar.Controls.Add($btnO)
+        $btnO.add_Click({ try { if ($dd) { Start-Process explorer.exe -ArgumentList ('"' + $dd + '"') } } catch { } })
+
+        $stream = $null
+        $lst.add_SelectedIndexChanged({
+            try {
+                $idx = $lst.SelectedIndex
+                if ($idx -lt 0) { return }
+                if ($null -ne $stream) { $stream.Dispose(); $stream = $null }
+                if ($null -ne $pic.Image) { $pic.Image.Dispose(); $pic.Image = $null }
+                $bytes = [System.IO.File]::ReadAllBytes($imgs[$idx].FullName)
+                $stream = New-Object System.IO.MemoryStream(,$bytes)
+                $img = [System.Drawing.Image]::FromStream($stream)
+                $pic.Image = $img
+            } catch { }
+        })
+        $lst.add_DoubleClick({
+            try {
+                $idx = $lst.SelectedIndex
+                if ($idx -ge 0) { Start-Process -FilePath $imgs[$idx].FullName }
+            } catch { }
+        })
+        $dlg.add_FormClosed({
+            try { if ($null -ne $stream) { $stream.Dispose() } } catch { }
+            try { if ($null -ne $pic.Image) { $pic.Image.Dispose() } } catch { }
+        })
+        if ($imgs.Count -gt 0) { $lst.SelectedIndex = 0 }
+        [void]$dlg.ShowDialog($form)
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, '打开失败', 'OK', 'Warning') | Out-Null
+    }
+})
+
+$btnOpenDefaultDir.add_Click({
+    try {
+        $dd = Get-SeewoDefaultImageDir
+        if ($dd -and (Test-Path -LiteralPath $dd)) {
+            Start-Process explorer.exe -ArgumentList ('"' + $dd + '"')
+        } else {
+            [System.Windows.Forms.MessageBox]::Show(
+                ('还没找到默认图片目录。' + $script:NL + $script:NL + '路径：' + $dd + $script:NL + $script:NL +
+                 '通常在你用希沃账号登录、集控下发过屏保图片之后才会有。'),
+                '暂无图片', 'OK', 'Information') | Out-Null
+        }
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, '打开失败', 'OK', 'Warning') | Out-Null
     }
 })
 
@@ -3122,7 +3296,7 @@ $btnWebPick.add_Click({
     try {
         $of = New-Object System.Windows.Forms.OpenFileDialog
         $of.Multiselect = $false
-        $of.Filter = '网页文件|*.html;*.htm;*.xhtml;*.svg;*.mhtml;*.mht|所有文件|*.*'
+        $of.Filter = '网页或视频|*.html;*.htm;*.xhtml;*.svg;*.mhtml;*.mht;*.mp4;*.webm;*.ogv;*.mov;*.m4v|网页文件|*.html;*.htm;*.xhtml;*.mhtml|视频文件|*.mp4;*.webm;*.ogv;*.mov;*.m4v|所有文件|*.*'
         if ($of.ShowDialog() -ne 'OK') { return }
         $txtWebUrl.Text = $of.FileName
     } catch {
@@ -3316,13 +3490,11 @@ foreach ($rb in @($rbModeImage, $rbModeWeb, $rbModeNone)) {
 Update-ModeVisibility
 
 $linkLog.add_Click({
-    if (Test-Path -LiteralPath $script:LogPath) {
-        Start-Process notepad.exe -ArgumentList ('"' + $script:LogPath + '"')
-    } else {
-        [System.Windows.Forms.MessageBox]::Show(
-            ('还没有日志文件：' + $script:NL + $script:LogPath + $script:NL + $script:NL +
-             '日志在注入生效、管家启动后才会产生。'),
-            '暂无日志', 'OK', 'Information') | Out-Null
+    try {
+        if (-not (Test-Path -LiteralPath $script:LogDir)) { New-Item -ItemType Directory -Path $script:LogDir -Force | Out-Null }
+        Start-Process explorer.exe -ArgumentList ('"' + $script:LogDir + '"')
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, '打开失败', 'OK', 'Warning') | Out-Null
     }
 })
 

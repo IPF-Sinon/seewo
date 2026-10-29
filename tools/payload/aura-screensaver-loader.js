@@ -80,7 +80,8 @@
         var base = process.env.APPDATA ||
           (process.env.USERPROFILE ? path.join(process.env.USERPROFILE, 'AppData', 'Roaming') : null);
         if (!base) return false;
-        file = path.join(base, 'seewo', 'AuraScreensaver', 'aura-screensaver.log');
+        // 所有日志统一放 logs 子目录（见界面上的「打开日志目录」）
+        file = path.join(base, 'seewo', 'AuraScreensaver', 'logs', 'aura-screensaver.log');
         return true;
       } catch (e) { return false; }
     }
@@ -1326,6 +1327,27 @@
       }
 
       try { w.on('closed', function () { state.webWin = null; }); } catch (e) { }
+
+    // ★ 视频文件：走 Chromium 自带播放器会有控件且不循环，
+    //   所以生成一个极简 HTML 包一层，全屏、静音、自动循环。
+    //   （data: URL 里引用 file: 会被拦，所以写成临时 html 文件再加载。）
+    var isVideo = /\.(mp4|webm|ogv|ogg|mov|m4v)$/i.test(target);
+    if (isVideo && /^file:\/\//i.test(target)) {
+      try {
+        var vhtmlPath = resolveDataFile(['seewo', 'AuraScreensaver', 'video.html']);
+        var vsrc = target.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+        var vhtml = '<!doctype html><meta charset="utf-8"><title>AuraVideo</title>' +
+          '<style>html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden}' +
+          'video{width:100%;height:100%;object-fit:contain;display:block}</style>' +
+          '<video src="' + vsrc + '" autoplay loop muted playsinline></video>';
+        var fsv = require('fs');
+        fsv.writeFileSync(vhtmlPath, vhtml, 'utf8');
+        target = 'file:///' + vhtmlPath.replace(/\\/g, '/').replace(/^\//, '');
+        log.info('检测到视频文件，改用全屏循环播放页面');
+      } catch (e) {
+        log.warn('视频包装失败，按原样加载: ' + (e && e.message || e));
+      }
+    }
 
       w.loadURL(target);
       try { w.focus(); } catch (e) { }
