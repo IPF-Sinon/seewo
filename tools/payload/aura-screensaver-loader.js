@@ -143,7 +143,7 @@
     //   而是弹出我们自己的全屏窗口加载 url。
     //   这样动画与版式完全由网页决定（CSS/JS/视频都行），
     //   不必去改官方渲染器里那 7 种写死的转场。
-    web: { enabled: false, url: '', closeOnClick: false, useSystemBrowser: false },
+    web: { enabled: false, url: '', closeOnClick: false, useSystemBrowser: false, fullscreenKiosk: false },
     logLevel: 'info',
   };
 
@@ -205,6 +205,7 @@
       if (typeof cfg.web.url !== 'string') cfg.web.url = '';
       if (typeof cfg.web.closeOnClick !== 'boolean') cfg.web.closeOnClick = false;
       if (typeof cfg.web.useSystemBrowser !== 'boolean') cfg.web.useSystemBrowser = false;
+      if (typeof cfg.web.fullscreenKiosk !== 'boolean') cfg.web.fullscreenKiosk = false;
     }
     return cfg;
   }
@@ -1101,15 +1102,25 @@
 
       closeWebWindow(state, log);   // 先收掉上一个（内建的或外部的）
 
+      // ★ 不用 --kiosk：kiosk 完全没有界面，而外部进程我们又管不到它的按键，
+      //   结果就是「退不出来」（用户实测：ESC/Ctrl+Alt+Q 都无效，只能 Alt+F4）。
+      //   改用 --app= 应用窗口模式：没有标签栏和地址栏，
+      //   但保留标题栏和**关闭按钮（X）** —— 鼠标/触摸都能点，稳定可退出。
+      var fullscreenKiosk = !!(cfg && cfg.web && cfg.web.fullscreenKiosk);
       var args = [
-        '--kiosk',
         '--user-data-dir=' + profile,
         '--no-first-run',
         '--no-default-browser-check',
-        '--disable-session-crashed-bubble',
-        '--edge-kiosk-type=fullscreen',   // Edge 专用；Chrome 会忽略未知参数
-        target
+        '--disable-session-crashed-bubble'
       ];
+      if (fullscreenKiosk) {
+        args.push('--kiosk');
+        args.push('--edge-kiosk-type=fullscreen');
+        args.push(target);
+      } else {
+        args.push('--app=' + target);
+        args.push('--start-maximized');
+      }
       var child = cp.spawn(exe, args, { detached: false, stdio: 'ignore' });
       state.webProc = child;
 
@@ -1135,36 +1146,14 @@
         }
       } catch (e) { }
 
-      // 保底出口：把 PID 写出来，桌面放一个双击即退出的批处理
-      var pidFile = null;
+      // 仍然记下 PID：方便 GUI 或其它工具关掉它
       try {
-        pidFile = resolveDataFile(['seewo', 'AuraScreensaver', 'web-browser.pid']);
-        fs2.writeFileSync(pidFile, String(child.pid), 'utf8');
+        fs2.writeFileSync(resolveDataFile(['seewo', 'AuraScreensaver', 'web-browser.pid']), String(child.pid), 'utf8');
       } catch (e) { }
-      try {
-        var desk = process.env.USERPROFILE ? (process.env.USERPROFILE + '\\Desktop') : null;
-        if (desk && fs2.existsSync(desk) && pidFile) {
-          var bat = desk + '\\退出网页屏保.bat';
-          var bl = [
-            '@echo off',
-            'chcp 65001 >nul 2>nul',
-            'set PF=' + pidFile,
-            'if not exist "%PF%" (echo 当前没有正在运行的网页屏保。& pause & exit /b)',
-            'set /p PID=<"%PF%"',
-            'echo 正在关闭网页屏保 (PID %PID%) ...',
-            'taskkill /PID %PID% /T /F',
-            'del "%PF%" >nul 2>nul',
-            'echo 完成。',
-            'pause'
-          ];
-          try { fs2.writeFileSync(bat, bl.join('\r\n'), 'utf8'); } catch (e) { }
-        }
-      } catch (e) { }
-
       if (hotOk.length) {
-        log.info('已注册退出快捷键: ' + hotOk.join(' / ') + '（另有 Alt+F4，以及桌面「退出网页屏保.bat」）');
+        log.info('已注册退出快捷键: ' + hotOk.join(' / ') + '（窗口模式可直接点右上角 X）');
       } else {
-        log.warn('全局快捷键没注册上（可能被别的程序占用）—— 请按 Alt+F4，或双击桌面「退出网页屏保.bat」');
+        log.warn('全局快捷键没注册上（可能被别的程序占用）—— 直接点窗口右上角的 X 即可');
       }
       try {
         child.on('exit', function () {
@@ -1180,7 +1169,7 @@
         });
       } catch (e) { }
 
-      log.info('网页屏保已用系统浏览器打开（kiosk，内核为最新 Chromium）');
+      log.info('网页屏保已用系统浏览器打开（' + (fullscreenKiosk ? '全屏 kiosk' : '应用窗口，右上角有关闭按钮') + '，内核为最新 Chromium）');
       log.info('  浏览器: ' + exe);
       log.info('  地址  : ' + target);
       log.info('  退出  : 按 Alt+F4，或在界面点「关闭网页」');
