@@ -1122,6 +1122,14 @@
       closeWebWindow(state, log);   // 先收掉上一个（内建的或外部的）
 
       var fullscreenKiosk = !!(cfg && cfg.web && cfg.web.fullscreenKiosk);
+      // ★ 系统浏览器才需要独立 profile（不污染用户自己的浏览记录/登录态）。
+      //   上一版插内核逻辑时把这行误删了，导致 profile is not defined，
+      //   系统浏览器这条路直接抛错并回退 —— 用户日志里就抓到了这个。
+      var profile = '';
+      if (!useKernel) {
+        profile = resolveDataFile(['seewo', 'AuraScreensaver', 'browser-profile']);
+        try { fs2.mkdirSync(profile, { recursive: true }); } catch (e) { }
+      }
       // 记录 PID：方便 GUI / 其它工具关掉它
       var pidFile = resolveDataFile(['seewo', 'AuraScreensaver', 'web-browser.pid']);
       var args;
@@ -1152,6 +1160,16 @@
       }
       var child = cp.spawn(exe, args, { detached: false, stdio: 'ignore' });
       state.webProc = child;
+
+      // ★ spawn 失败是异步的（error 事件），不会同步抛异常。
+      //   不挂这个处理器的话，进程压根没起来也照样报「打开成功」，
+      //   用户看到的就是黑屏或没反应。
+      try {
+        child.on('error', function (err) {
+          try { log.error('浏览器进程启动失败: ' + (err && err.message || err)); } catch (e) { }
+          if (state.webProc === child) { state.webProc = null; }
+        });
+      } catch (e) { }
 
       // ★ 系统浏览器是**独立进程**：内置窗口那套 ESC / 注入按钮都管不到它。
       //   所以这里在希沃的 Electron 主进程里注册**全局**快捷键 ——

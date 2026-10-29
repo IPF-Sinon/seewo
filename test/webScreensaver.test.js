@@ -528,3 +528,24 @@ test('★ 勾了「用系统浏览器」但机器上没有 Edge/Chrome：不崩�
     assert.equal(env.onMessageCalls.length, 1, '必须回退到官方屏保，不能什么都不显示');
   } finally { env.cleanup(); }
 });
+test('★★ 系统浏览器路径不能有未声明变量（曾误删 profile 定义导致 profile is not defined）', () => {
+  // 用一个**存在但不是可执行文件**的路径冒充浏览器：
+  // 既能走完 setteup（含 profile 计算）走到 spawn，又不会真的拉起进程。
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aura-bp-'));
+  const fake = path.join(dir, 'not-a-browser.txt');
+  fs.writeFileSync(fake, 'not executable');
+  const env = boot({ config: { screensaverEnabled: true, mode: 'web',
+    web: { enabled: true, url: 'https://example.com', useSystemBrowser: true, browserPath: fake } } });
+  try {
+    const r = env.g.control.showWeb({ url: 'https://example.com' });
+    // 关键断言：不能因为未声明变量而走异常分支。
+    // （spawn 本身的失败是异步的，由 loader 的 error 处理器记日志，不在返回值里。）
+    assert.ok(!/is not defined/.test(String((r && r.message) || '')),
+      '不得出现未声明变量，实际: ' + (r && r.message));
+    assert.notEqual(r && r.reason, 'exception', '不该走异常分支: ' + (r && r.message));
+    assert.equal(env.created.length, 0, '不该建内建窗口');
+  } finally {
+    env.cleanup();
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { }
+  }
+});
