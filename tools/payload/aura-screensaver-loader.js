@@ -143,7 +143,7 @@
     //   而是弹出我们自己的全屏窗口加载 url。
     //   这样动画与版式完全由网页决定（CSS/JS/视频都行），
     //   不必去改官方渲染器里那 7 种写死的转场。
-    web: { enabled: false, url: '', closeOnClick: false, useSystemBrowser: false, fullscreenKiosk: false },
+    web: { enabled: false, url: '', closeOnClick: false, useSystemBrowser: false, fullscreenKiosk: false, useBundledKernel: false },
     logLevel: 'info',
   };
 
@@ -206,6 +206,7 @@
       if (typeof cfg.web.closeOnClick !== 'boolean') cfg.web.closeOnClick = false;
       if (typeof cfg.web.useSystemBrowser !== 'boolean') cfg.web.useSystemBrowser = false;
       if (typeof cfg.web.fullscreenKiosk !== 'boolean') cfg.web.fullscreenKiosk = false;
+      if (typeof cfg.web.useBundledKernel !== 'boolean') cfg.web.useBundledKernel = false;
     }
     return cfg;
   }
@@ -1091,35 +1092,63 @@
     }
 
     try {
-      var exe = findSystemBrowser(cfg, log);
-      if (!exe) return { ok: false, reason: 'no-browser', message: '没找到 Edge 或 Chrome，无法用系统内核' };
       var cp = require('child_process');
       var fs2 = require('fs');
 
-      // 独立 profile：不污染用户自己的浏览记录/登录态
-      var profile = resolveDataFile(['seewo', 'AuraScreensaver', 'browser-profile']);
-      try { fs2.mkdirSync(profile, { recursive: true }); } catch (e) { }
-
+      // ★ 优先用「下载的新内核」——那是我们自己的 Electron + 我们自己的 main.js，
+      //   窗口属于我们，所以注入退出按钮、接管 ESC 都有效（系统浏览器不行）。
+      var kernelDir = '';
+      try { kernelDir = (process.env.ProgramData || 'C:\\ProgramData') + '\\seewo\\AuraScreensaver\\kernel'; } catch (e) { }
+      var kernelExe = kernelDir ? (kernelDir + '\\electron.exe') : null;
+      var kernelMain = kernelDir ? (kernelDir + '\\resources\\app\\main.js') : null;
+      var wantKernel = !!(cfg && cfg.web && cfg.web.useBundledKernel);
+      var useKernel = false;
+      var exe = null;
+      if (wantKernel) {
+        try {
+          useKernel = !!(kernelExe && fs2.existsSync(kernelExe) && kernelMain && fs2.existsSync(kernelMain));
+        } catch (e) { }
+        if (!useKernel) {
+          log.warn('勾了「用新内核」但还没下载好，回退系统浏览器');
+        } else {
+          exe = kernelExe;
+          log.info('使用下载的新内核: ' + kernelExe);
+        }
+      }
+      if (!useKernel) {
+        exe = findSystemBrowser(cfg, log);
+        if (!exe) return { ok: false, reason: 'no-browser', message: '没找到 Edge 或 Chrome，也没有下载新内核' };
+      }
       closeWebWindow(state, log);   // 先收掉上一个（内建的或外部的）
 
-      // ★ 不用 --kiosk：kiosk 完全没有界面，而外部进程我们又管不到它的按键，
-      //   结果就是「退不出来」（用户实测：ESC/Ctrl+Alt+Q 都无效，只能 Alt+F4）。
-      //   改用 --app= 应用窗口模式：没有标签栏和地址栏，
-      //   但保留标题栏和**关闭按钮（X）** —— 鼠标/触摸都能点，稳定可退出。
       var fullscreenKiosk = !!(cfg && cfg.web && cfg.web.fullscreenKiosk);
-      var args = [
-        '--user-data-dir=' + profile,
-        '--no-first-run',
-        '--no-default-browser-check',
-        '--disable-session-crashed-bubble'
-      ];
-      if (fullscreenKiosk) {
-        args.push('--kiosk');
-        args.push('--edge-kiosk-type=fullscreen');
-        args.push(target);
+      // 记录 PID：方便 GUI / 其它工具关掉它
+      var pidFile = resolveDataFile(['seewo', 'AuraScreensaver', 'web-browser.pid']);
+      var args;
+      if (useKernel) {
+        // 我们的包装程序：自己全屏、自己注入退出按钮、自己接管 ESC
+        args = [
+          '--aura-url=' + target,
+          '--aura-pid=' + pidFile,
+          '--disable-features=Translate'
+        ];
       } else {
-        args.push('--app=' + target);
-        args.push('--start-maximized');
+        // 系统浏览器：--app 应用窗口模式保留关闭按钮；
+        // kiosk 则完全没有界面，只能靠快捷键（所以才默认不用）
+        args = [
+          '--user-data-dir=' + profile,
+          '--no-first-run',
+          '--no-default-browser-check',
+          '--disable-session-crashed-bubble'
+        ];
+        if (fullscreenKiosk) {
+          args.push('--kiosk');
+          args.push('--edge-kiosk-type=fullscreen');
+          args.push(target);
+        } else {
+          args.push('--app=' + target);
+          args.push('--start-maximized');
+        }
       }
       var child = cp.spawn(exe, args, { detached: false, stdio: 'ignore' });
       state.webProc = child;
@@ -1146,10 +1175,6 @@
         }
       } catch (e) { }
 
-      // 仍然记下 PID：方便 GUI 或其它工具关掉它
-      try {
-        fs2.writeFileSync(resolveDataFile(['seewo', 'AuraScreensaver', 'web-browser.pid']), String(child.pid), 'utf8');
-      } catch (e) { }
       if (hotOk.length) {
         log.info('已注册退出快捷键: ' + hotOk.join(' / ') + '（窗口模式可直接点右上角 X）');
       } else {
@@ -1169,10 +1194,15 @@
         });
       } catch (e) { }
 
-      log.info('网页屏保已用系统浏览器打开（' + (fullscreenKiosk ? '全屏 kiosk' : '应用窗口，右上角有关闭按钮') + '，内核为最新 Chromium）');
-      log.info('  浏览器: ' + exe);
+      if (useKernel) {
+        log.info('网页屏保已用**下载的新内核**打开（我们自己的 Electron，可注入按钮）');
+        log.info('  退出  : 按 ESC / Ctrl+Alt+Q，或点右下角「退出屏保」按钮');
+      } else {
+        log.info('网页屏保已用系统浏览器打开（' + (fullscreenKiosk ? '全屏 kiosk' : '应用窗口，右上角有关闭按钮') + '）');
+        log.info('  退出  : ' + (fullscreenKiosk ? 'ESC / Ctrl+Alt+Q / Alt+F4' : '点右上角 X，或 Alt+F4'));
+      }
+      log.info('  程序  : ' + exe);
       log.info('  地址  : ' + target);
-      log.info('  退出  : 按 Alt+F4，或在界面点「关闭网页」');
       return { ok: true, url: target, engine: 'system', browser: exe };
     } catch (e) {
       log.error('系统浏览器打开失败: ' + (e && e.message || e));

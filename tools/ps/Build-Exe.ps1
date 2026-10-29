@@ -28,9 +28,12 @@ $repoRoot  = Split-Path -Parent (Split-Path -Parent $scriptDir)
 $asarLibFile   = Join-Path $scriptDir 'AsarLib.ps1'
 $locateFile    = Join-Path $scriptDir 'SeewoLocate.ps1'
 $guiFile       = Join-Path $scriptDir 'ConfigGui.ps1'
+$electronAppFile = Join-Path $scriptDir 'ElectronApp.ps1'
 $loaderFile    = Join-Path $repoRoot (Join-Path 'tools' (Join-Path 'payload' 'aura-screensaver-loader.js'))
+$kernelMainJs  = Join-Path $repoRoot 'tools\electron-app\main.js'
+$kernelPkgJson = Join-Path $repoRoot 'tools\electron-app\package.json'
 
-foreach ($f in @($asarLibFile, $locateFile, $guiFile, $loaderFile)) {
+foreach ($f in @($asarLibFile, $locateFile, $guiFile, $loaderFile, $kernelMainJs, $kernelPkgJson, $electronAppFile)) {
     if (-not (Test-Path -LiteralPath $f)) { throw "缺少打包所需文件：$f" }
 }
 
@@ -47,22 +50,32 @@ function Read-Source {
     return $t
 }
 
+Write-Host '[*] 读取内核包装程序…' -ForegroundColor Cyan
+$kernelMainB64 = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes([System.IO.File]::ReadAllText($kernelMainJs, [System.Text.Encoding]::UTF8)))
+$kernelPkgB64  = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes([System.IO.File]::ReadAllText($kernelPkgJson, [System.Text.Encoding]::UTF8)))
+Write-Host ('    [OK] main.js ' + [math]::Round($kernelMainB64.Length / 1KB, 1) + ' KB (b64)') -ForegroundColor Green
+
 Write-Host '[*] 读取模块…' -ForegroundColor Cyan
 $asarLib = Read-Source -Path $asarLibFile -Label 'AsarLib.ps1 '
 $locate  = Read-Source -Path $locateFile  -Label 'SeewoLocate.ps1'
 $gui     = Read-Source -Path $guiFile     -Label 'ConfigGui.ps1'
+$eapp    = Read-Source -Path $electronAppFile -Label 'ElectronApp.ps1'
 
 $sb = New-Object System.Text.StringBuilder
 [void]$sb.Append('# AuraScreensaver 单文件版 —— 由 tools/ps/Build-Exe.ps1 自动生成，请勿手工编辑' + $NL)
 [void]$sb.Append('# 组成：内嵌加载器 + asar 函数库 + 目录定位 + WinForms 界面' + $NL)
-[void]$sb.Append('$script:InjectionVersion = ' + [char]39 + '1.20.0' + [char]39 + $NL)
+[void]$sb.Append('$script:InjectionVersion = ' + [char]39 + '1.21.0' + [char]39 + $NL)
 [void]$sb.Append('$script:LoaderB64 = ' + "'" + $loaderB64 + "'" + $NL)
 [void]$sb.Append('$script:LoaderText = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:LoaderB64))' + $NL)
+[void]$sb.Append('$script:KernelMainJsB64 = ' + [char]39 + $kernelMainB64 + [char]39 + $NL)
+[void]$sb.Append('$script:KernelPkgB64 = ' + [char]39 + $kernelPkgB64 + [char]39 + $NL)
 [void]$sb.Append('$script:DefaultConfigJson = ' + "'{""screensaverEnabled"":false,""lockCascadeOnClose"":false,""override"":null,""logLevel"":""info""}'" + $NL)
 [void]$sb.Append($NL + '# ============================ asar 函数库 ============================' + $NL)
 [void]$sb.Append($asarLib + $NL)
 [void]$sb.Append($NL + '# ============================ 目录定位 ============================' + $NL)
 [void]$sb.Append($locate + $NL)
+[void]$sb.Append($NL + '# ============================ 内核下载 ============================' + $NL)
+[void]$sb.Append($eapp + $NL)
 [void]$sb.Append($NL + '# ============================ 图形界面 ============================' + $NL)
 [void]$sb.Append($gui + $NL)
 
@@ -99,7 +112,7 @@ $splat = @{
     Title        = '希沃屏保配置'
     Description  = '关闭/深度配置希沃管家屏保（注入式）'
     Product      = 'AuraScreensaver'
-    Version      = '1.20.0.0'
+    Version      = '1.21.0.0'
 }
 if ($ps2exeParams.ContainsKey('STA'))       { $splat['STA'] = $true }
 if ($ps2exeParams.ContainsKey('SupportOS')) { $splat['SupportOS'] = $true }

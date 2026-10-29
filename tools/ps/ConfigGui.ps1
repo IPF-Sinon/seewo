@@ -131,7 +131,7 @@ try {
         } catch { }
     })
 } catch { }
-if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.20.0' }
+if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.21.0' }
 
 # ---------------------------------------------------------------------------
 # 管理员权限（写入 Program Files 必需）
@@ -196,7 +196,7 @@ function Get-DefaultConfig {
         lockCascadeOnClose = $false
         allowManualClose   = $true
         override           = $null
-        web                = [pscustomobject]@{ enabled = $false; url = ''; closeOnClick = $false; useSystemBrowser = $false; fullscreenKiosk = $false; browserPath = '' }
+        web                = [pscustomobject]@{ enabled = $false; url = ''; closeOnClick = $false; useSystemBrowser = $false; fullscreenKiosk = $false; useBundledKernel = $false; browserPath = '' }
         mode               = 'none'
         logLevel           = 'info'
         backupCount        = 3
@@ -1261,6 +1261,16 @@ $webPanel.WrapContents = $true
 $webPanel.Margin = New-Object System.Windows.Forms.Padding(0)
 
 
+$chkWebKernel = New-Object System.Windows.Forms.CheckBox
+$chkWebKernel.Text = '用新内核（下载的 Chromium）'
+$chkWebKernel.AutoSize = $true
+$chkWebKernel.Margin = New-Object System.Windows.Forms.Padding(3, 6, 14, 4)
+$webPanel.Controls.Add($chkWebKernel)
+$btnKernel = New-Object System.Windows.Forms.Button
+$btnKernel.Text = '下载新内核…'
+$btnKernel.AutoSize = $true
+$btnKernel.Margin = New-Object System.Windows.Forms.Padding(0, 2, 6, 2)
+$webPanel.Controls.Add($btnKernel)
 $chkWebSys = New-Object System.Windows.Forms.CheckBox
 $chkWebSys.Text = '用系统浏览器（Edge/Chrome，新内核）'
 $chkWebSys.AutoSize = $true
@@ -1307,6 +1317,14 @@ $txtWebBrowser.Anchor = 'Left,Right'
 $txtWebBrowser.Margin = New-Object System.Windows.Forms.Padding(3, 4, 3, 4)
 $table.Controls.Add($txtWebBrowser)
 
+
+$lblKernelStatus = New-Object System.Windows.Forms.Label
+$lblKernelStatus.AutoSize = $true
+$lblKernelStatus.ForeColor = [System.Drawing.Color]::DimGray
+$lblKernelStatus.Margin = New-Object System.Windows.Forms.Padding(3, 0, 3, 4)
+$lblKernelStatus.Text = '新内核：检查中…'
+$table.Controls.Add($lblKernelStatus)
+$table.SetColumnSpan($lblKernelStatus, 2)
 $lblBrowserHint = New-Object System.Windows.Forms.Label
 $lblBrowserHint.AutoSize = $true
 $lblBrowserHint.ForeColor = [System.Drawing.Color]::DimGray
@@ -1629,6 +1647,7 @@ function Update-ModeVisibility {
 
     $chkWebSys.Enabled = $web
     $chkWebKiosk.Enabled = $web
+    $btnKernel.Enabled = $web
     $btnWebBrowser.Enabled = $web
     $txtWebBrowser.Enabled = $web
     $btnWebPick.Enabled = $web
@@ -1658,6 +1677,7 @@ function Fill-Form {
     if ($null -ne $Cfg.web -and $null -ne $Cfg.web.url) { $txtWebUrl.Text = [string]$Cfg.web.url } else { $txtWebUrl.Text = '' }
     $chkWebSys.Checked = ($null -ne $Cfg.web -and $Cfg.web.useSystemBrowser -eq $true)
     $chkWebKiosk.Checked = ($null -ne $Cfg.web -and $Cfg.web.fullscreenKiosk -eq $true)
+    $chkWebKernel.Checked = ($null -ne $Cfg.web -and $Cfg.web.useBundledKernel -eq $true)
     if ($null -ne $Cfg.web -and $null -ne $Cfg.web.browserPath) { $txtWebBrowser.Text = [string]$Cfg.web.browserPath } else { $txtWebBrowser.Text = '' }
 
     if ($null -ne $ov) {
@@ -1758,7 +1778,7 @@ function Build-Config {
         allowManualClose = $true
         mode = $mode
         override = $ov
-        web = [pscustomobject]@{ enabled = ($mode -eq 'web'); url = (Normalize-WebInput -Raw $txtWebUrl.Text); closeOnClick = $false; useSystemBrowser = [bool]$chkWebSys.Checked; fullscreenKiosk = [bool]$chkWebKiosk.Checked; browserPath = $txtWebBrowser.Text.Trim() }
+        web = [pscustomobject]@{ enabled = ($mode -eq 'web'); url = (Normalize-WebInput -Raw $txtWebUrl.Text); closeOnClick = $false; useSystemBrowser = [bool]$chkWebSys.Checked; fullscreenKiosk = [bool]$chkWebKiosk.Checked; useBundledKernel = [bool]$chkWebKernel.Checked; browserPath = $txtWebBrowser.Text.Trim() }
         logLevel = 'info'
         backupCount = 3
     }
@@ -3008,6 +3028,79 @@ $btnTransRandom.add_Click({
 })
 $btnTransClear.add_Click({ $txtTrans.Text = '' })
 
+# --- 新内核：下载（后台任务 + 定时器轮询，界面不卡） ---
+$script:KernelTimer = New-Object System.Windows.Forms.Timer
+$script:KernelTimer.Interval = 1500
+
+function Update-AuraKernelStatus {
+    try {
+        $info = Get-AuraKernelInfo
+        if ($info.Ready) {
+            $lblKernelStatus.Text = ('新内核：v' + $info.Version + ' 已就绪（' + $info.SizeMB + ' MB）')
+            $chkWebKernel.Enabled = $true
+        } else {
+            $lblKernelStatus.Text = '新内核：未下载（约 151MB，可选）'
+            $chkWebKernel.Checked = $false
+            $chkWebKernel.Enabled = $false
+        }
+    } catch { }
+}
+
+$script:KernelTimer.add_Tick({
+    try {
+        if (-not $script:KernelJobId) { $script:KernelTimer.Stop(); return }
+        $j = Get-Job -Id $script:KernelJobId -ErrorAction SilentlyContinue
+        if (-not $j) { $script:KernelTimer.Stop(); $btnKernel.Enabled = $true; return }
+        if ($j.State -eq 'Running') {
+            $o = Receive-Job -Job $j -Keep 2>$null | Select-Object -Last 1
+            if ($o) { $lblKernelStatus.Text = '新内核：' + [string]$o }
+            return
+        }
+        $script:KernelTimer.Stop()
+        $res = Receive-Job -Job $j
+        Remove-Job -Job $j -Force -ErrorAction SilentlyContinue
+        $script:KernelJobId = $null
+        $btnKernel.Enabled = $true
+        $r = $res | Where-Object { $_ -is [hashtable] } | Select-Object -Last 1
+        if ($r -and $r.Ok) {
+            Add-Log ('新内核下载完成 v' + $r.Version)
+            Update-AuraKernelStatus
+            [System.Windows.Forms.MessageBox]::Show('新内核已下载完成。现在可以勾选「用新内核」了。', '完成', 'OK', 'Information') | Out-Null
+        } else {
+            $msg = ''
+            if ($r) { $msg = [string]$r.Err }
+            Add-Log ('新内核下载失败: ' + $msg)
+            $lblKernelStatus.Text = '新内核：下载失败'
+            [System.Windows.Forms.MessageBox]::Show(('下载失败：' + $msg + $script:NL + $script:NL + '可以稍后重试。'), '下载失败', 'OK', 'Warning') | Out-Null
+        }
+    } catch { }
+})
+
+$btnKernel.add_Click({
+    try {
+        $ans = [System.Windows.Forms.MessageBox]::Show(
+            ('将下载 Electron 新内核，约 151MB（解压后约 250MB）。' + $script:NL +
+             '下载源：GitHub 直连；连不上时自动改走 gh-proxy.com 代理。' + $script:NL + $script:NL +
+             '为什么需要它：这是个由我们自己控制的浏览器内核，' + $script:NL +
+             '窗口属于我们，所以能注入「退出屏保」按钮、能接管 ESC ——' + $script:NL +
+             '内置内核太旧打不开的网站，用它就能正常打开且随时退得出去。' + $script:NL + $script:NL +
+             '下载在后台进行（界面不卡）。继续吗？'),
+            '下载新内核', 'YesNo', 'Question')
+        if ($ans -ne 'Yes') { return }
+        $btnKernel.Enabled = $false
+        $lblKernelStatus.Text = '新内核：正在获取版本号…'
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-AuraKernelDownload | Out-Null
+        $lblKernelStatus.Text = '新内核：下载中…（请耐心等待）'
+        $script:KernelTimer.Start()
+    } catch {
+        $btnKernel.Enabled = $true
+        $lblKernelStatus.Text = '新内核：启动失败'
+        Add-Log ('启动内核下载失败: ' + $_.Exception.Message)
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, '下载失败', 'OK', 'Warning') | Out-Null
+    }
+})
+
 # 手动指定浏览器 exe（自动找不到 Edge/Chrome 时用）
 $btnWebBrowser.add_Click({
     try {
@@ -3287,4 +3380,5 @@ if (($args -contains '-SafeInstall') -or ($args -contains '-SafeUninstall')) {
 
 
 
+try { Update-AuraKernelStatus } catch { }
 [void]$form.ShowDialog()
