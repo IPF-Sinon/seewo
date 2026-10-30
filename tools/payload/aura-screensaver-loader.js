@@ -803,13 +803,30 @@
       closeWebExitButton(log, state);
       // 系统浏览器模式：杀掉我们拉起来的进程（含子进程）
       if (state && state.webProc) {
+        log.info('正在关闭外部浏览器 pid=' + state.webProc.pid);
         try { state.webProc.kill(); } catch (e) { }
         try {
           var cp2 = require('child_process');
           cp2.spawn('taskkill.exe', ['/PID', String(state.webProc.pid), '/T', '/F'], { stdio: 'ignore' });
         } catch (e) { }
         state.webProc = null;
-        log.info('已关闭系统浏览器');
+        log.info('已关闭系统浏览器（已发 kill + taskkill）');
+      } else {
+        // 兜底：进程句柄没了，但 PID 文件还在 -> 按 PID 杀
+        try {
+          var pf2 = resolveDataFile(['seewo', 'AuraScreensaver', 'web-browser.pid']);
+          var fsv2 = require('fs');
+          if (fsv2.existsSync(pf2)) {
+            var pid2 = String(fsv2.readFileSync(pf2, 'utf8')).trim();
+            if (/^[0-9]+$/.test(pid2)) {
+              log.warn('没有进程句柄，按 PID 文件兜底杀 pid=' + pid2);
+              require('child_process').spawn('taskkill.exe', ['/PID', pid2, '/T', '/F'], { stdio: 'ignore' });
+            }
+            try { fsv2.unlinkSync(pf2); } catch (e2) { }
+          } else {
+            log.warn('关闭网页屏保：既没有进程句柄也没有 PID 文件，无法关闭外部浏览器');
+          }
+        } catch (e3) { }
       }
       if (state && state.webWin) {
         try { if (!state.webWin.isDestroyed()) state.webWin.close(); } catch (e) { }
@@ -1082,8 +1099,11 @@
    * 系统浏览器是全屏 kiosk（没有任何界面），而且全局快捷键在部分机器上
    * 注册不上。所以这里用**我们自己的 Electron** 建一个小窗口：
    * 置顶、无边框、右下角，就一个「退出屏保」按钮，浮在 Chrome 上面。
-   *   - 不依赖 globalShortcut，也不依赖浏览器版本
-   *   - 点击 -> 哨兵导航 -> 杀掉外部浏览器进程
+   *
+   * ★ 点击信号用 **IPC**，不要用「导航到自定义协议」——
+   *   实测后者在 file:// 页面里会被 Chromium 直接拦掉（按钮消失了但没关掉屏保，
+   *   因为 will-navigate 根本没触发，只是把页面换成了错误页）。
+   *   这个窗口是我们自己的本地页面，所以放心开 nodeIntegration。
    */
   function showWebExitButton(log, state) {
     try {
@@ -1091,25 +1111,28 @@
       if (!el || !el.BrowserWindow) { log.warn('拿不到 BrowserWindow，无法显示退出按钮'); return; }
       closeWebExitButton(log, state);
 
-      // 用 file:// 页面（data: URL 里跳自定义协议容易被拦）
       var dir = resolveDataFile(['seewo', 'AuraScreensaver']);
       try { require('fs').mkdirSync(dir, { recursive: true }); } catch (e) { }
       var page = require('path').join(dir, 'exit-btn.html');
       var html = '<!doctype html><meta charset="utf-8"><style>' +
         'html,body{margin:0;height:100%;overflow:hidden;background:transparent}' +
         'a{display:flex;align-items:center;justify-content:center;height:100%;border-radius:23px;' +
-        'background:rgba(20,20,20,.78);color:#fff;font:15px/1 "Microsoft YaHei UI",sans-serif;' +
-        'text-decoration:none;border:1px solid rgba(255,255,255,.42);' +
-        'box-shadow:0 4px 18px rgba(0,0,0,.55);-webkit-app-region:no-drag}' +
-        'a:hover{background:rgba(200,30,30,.92)}</style>' +
-        '<a href="aura-close://now">退出屏保</a>';
+        'background:rgba(20,20,20,.80);color:#fff;font:15px/1 "Microsoft YaHei UI",sans-serif;' +
+        'text-decoration:none;border:1px solid rgba(255,255,255,.45);cursor:pointer;' +
+        'box-shadow:0 4px 18px rgba(0,0,0,.55);user-select:none}' +
+        'a:hover{background:rgba(200,30,30,.95)}</style>' +
+        '<a id="q">退出屏保</a><script>' +
+        'document.getElementById("q").onclick=function(e){e.preventDefault();' +
+        'try{require("electron").ipcRenderer.send("aura-close-web");}' +
+        'catch(err){try{document.title="ERR:"+err.message;}catch(e2){}}};' +
+        '</script>';
       try { require('fs').writeFileSync(page, html, 'utf8'); } catch (e) { }
 
       var bw = new el.BrowserWindow({
         width: 132, height: 44, frame: false, transparent: true, resizable: false,
         movable: false, minimizable: false, maximizable: false, fullscreenable: false,
         alwaysOnTop: true, skipTaskbar: true, focusable: true, show: false,
-        webPreferences: { nodeIntegration: false, contextIsolation: true }
+        webPreferences: { nodeIntegration: true, contextIsolation: false, sandbox: false }
       });
       try { bw.setAlwaysOnTop(true, 'screen-saver'); } catch (e) { }
       try { bw.setVisibleOnAllWorkspaces(true); } catch (e) { }
@@ -1121,17 +1144,27 @@
         }
       } catch (e) { }
 
+      // 主通道：IPC
+      try {
+        if (el.ipcMain) {
+          try { el.ipcMain.removeAllListeners('aura-close-web'); } catch (e) { }
+          el.ipcMain.on('aura-close-web', function () {
+            try { log.info('收到悬浮按钮的 IPC 关闭请求'); } catch (e) { }
+            closeWebWindow(state, log);
+          });
+        }
+      } catch (e) { log.warn('注册 IPC 失败: ' + (e && e.message || e)); }
+
+      // 备用通道：哨兵导航（万一 IPC 不可用）
       try {
         bw.webContents.on('will-navigate', function (ev, u) {
           try {
             if (u && u.indexOf('aura-close:') === 0) {
               ev.preventDefault();
-              log.info('用户点了悬浮「退出屏保」按钮');
               closeWebWindow(state, log);
             }
           } catch (e) { }
         });
-        bw.webContents.setWindowOpenHandler(function () { return { action: 'deny' }; });
       } catch (e) { }
 
       bw.loadURL('file:///' + page.replace(/\\/g, '/').replace(/^\//, ''));
@@ -1139,7 +1172,7 @@
         try { bw.showInactive(); } catch (e) { try { bw.show(); } catch (e2) { } }
       });
       state.webExitWin = bw;
-      log.info('已显示置顶「退出屏保」悬浮按钮（右下角）');
+      log.info('已显示置顶「退出屏保」悬浮按钮（右下角，点击走 IPC）');
     } catch (e) {
       log.warn('创建退出悬浮按钮失败: ' + (e && e.message || e));
     }

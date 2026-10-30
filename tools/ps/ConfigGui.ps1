@@ -133,7 +133,7 @@ try {
         } catch { }
     })
 } catch { }
-if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.24.0' }
+if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.25.0' }
 
 # ---------------------------------------------------------------------------
 # 管理员权限（写入 Program Files 必需）
