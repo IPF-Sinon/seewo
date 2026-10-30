@@ -64,7 +64,7 @@ $eapp    = Read-Source -Path $electronAppFile -Label 'ElectronApp.ps1'
 $sb = New-Object System.Text.StringBuilder
 [void]$sb.Append('# AuraScreensaver 单文件版 —— 由 tools/ps/Build-Exe.ps1 自动生成，请勿手工编辑' + $NL)
 [void]$sb.Append('# 组成：内嵌加载器 + asar 函数库 + 目录定位 + WinForms 界面' + $NL)
-[void]$sb.Append('$script:InjectionVersion = ' + [char]39 + '1.23.0' + [char]39 + $NL)
+[void]$sb.Append('$script:InjectionVersion = ' + [char]39 + '1.24.0' + [char]39 + $NL)
 [void]$sb.Append('$script:LoaderB64 = ' + "'" + $loaderB64 + "'" + $NL)
 [void]$sb.Append('$script:LoaderText = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($script:LoaderB64))' + $NL)
 [void]$sb.Append('$script:KernelMainJsB64 = ' + [char]39 + $kernelMainB64 + [char]39 + $NL)
@@ -112,7 +112,7 @@ $splat = @{
     Title        = '希沃屏保配置'
     Description  = '关闭/深度配置希沃管家屏保（注入式）'
     Product      = 'AuraScreensaver'
-    Version      = '1.23.0.0'
+    Version      = '1.24.0.0'
 }
 if ($ps2exeParams.ContainsKey('STA'))       { $splat['STA'] = $true }
 if ($ps2exeParams.ContainsKey('SupportOS')) { $splat['SupportOS'] = $true }

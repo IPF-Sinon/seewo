@@ -133,7 +133,7 @@ try {
         } catch { }
     })
 } catch { }
-if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.23.0' }
+if (-not $script:InjectionVersion) { $script:InjectionVersion = '1.24.0' }
 
 # ---------------------------------------------------------------------------
 # 管理员权限（写入 Program Files 必需）
@@ -198,7 +198,7 @@ function Get-DefaultConfig {
         lockCascadeOnClose = $false
         allowManualClose   = $true
         override           = $null
-        web                = [pscustomobject]@{ enabled = $false; url = ''; closeOnClick = $false; useSystemBrowser = $false; fullscreenKiosk = $false; useBundledKernel = $false; browserPath = '' }
+        web                = [pscustomobject]@{ enabled = $false; url = ''; closeOnClick = $false; useSystemBrowser = $false; useBundledKernel = $false; browserPath = '' }
         mode               = 'none'
         logLevel           = 'info'
         backupCount        = 3
@@ -526,8 +526,8 @@ function Get-FieldHelpText {
     $L += '  （例：D:\anim\show.html，会自动转成 file:///）。'
     $L += '  改完地址点「保存配置」，再点「预览屏保」即可马上看效果；'
     $L += '  用内置内核时：屏保右下角有「退出屏保」按钮，也可以按 ESC。'
-    $L += '  用系统浏览器时：默认是应用窗口，直接点右上角的 X 即可退出；'
-    $L += '  勾了「全屏 kiosk」才需要 ESC / Ctrl+Alt+Q / Alt+F4。'
+    $L += '  用系统浏览器时：全屏 kiosk，退出点右下角的「退出屏保」悬浮按钮；'
+    $L += '  退出：右下角置顶的「退出屏保」按钮，或按 ESC / Alt+F4。'
     $L += '  若网页加载失败，会自动回退到官方图片屏保，不会黑屏卡住。'
     $L += ''
     $L += '【预览】'
@@ -1284,11 +1284,6 @@ $btnWebBrowser.Text = '手动选择浏览器…'
 $btnWebBrowser.AutoSize = $true
 $btnWebBrowser.Margin = New-Object System.Windows.Forms.Padding(0, 2, 6, 2)
 $webPanel.Controls.Add($btnWebBrowser)
-$chkWebKiosk = New-Object System.Windows.Forms.CheckBox
-$chkWebKiosk.Text = '全屏 kiosk（无边框；退出靠快捷键）'
-$chkWebKiosk.AutoSize = $true
-$chkWebKiosk.Margin = New-Object System.Windows.Forms.Padding(3, 6, 14, 4)
-$webPanel.Controls.Add($chkWebKiosk)
 $btnWebPick = New-Object System.Windows.Forms.Button
 $btnWebPick.Text = '选择网页文件…'
 $btnWebPick.AutoSize = $true
@@ -1684,7 +1679,6 @@ function Update-ModeVisibility {
     $txtTrans.Enabled = (-not $web)
 
     $chkWebSys.Enabled = $web
-    $chkWebKiosk.Enabled = $web
     $btnKernel.Enabled = $web
     $btnWebBrowser.Enabled = $web
     $txtWebBrowser.Enabled = $web
@@ -1714,7 +1708,6 @@ function Fill-Form {
 
     if ($null -ne $Cfg.web -and $null -ne $Cfg.web.url) { $txtWebUrl.Text = [string]$Cfg.web.url } else { $txtWebUrl.Text = '' }
     $chkWebSys.Checked = ($null -ne $Cfg.web -and $Cfg.web.useSystemBrowser -eq $true)
-    $chkWebKiosk.Checked = ($null -ne $Cfg.web -and $Cfg.web.fullscreenKiosk -eq $true)
     $chkWebKernel.Checked = ($null -ne $Cfg.web -and $Cfg.web.useBundledKernel -eq $true)
     if ($null -ne $Cfg.web -and $null -ne $Cfg.web.browserPath) { $txtWebBrowser.Text = [string]$Cfg.web.browserPath } else { $txtWebBrowser.Text = '' }
 
@@ -1816,7 +1809,7 @@ function Build-Config {
         allowManualClose = $true
         mode = $mode
         override = $ov
-        web = [pscustomobject]@{ enabled = ($mode -eq 'web'); url = (Normalize-WebInput -Raw $txtWebUrl.Text); closeOnClick = $false; useSystemBrowser = [bool]$chkWebSys.Checked; fullscreenKiosk = [bool]$chkWebKiosk.Checked; useBundledKernel = [bool]$chkWebKernel.Checked; browserPath = $txtWebBrowser.Text.Trim() }
+        web = [pscustomobject]@{ enabled = ($mode -eq 'web'); url = (Normalize-WebInput -Raw $txtWebUrl.Text); closeOnClick = $false; useSystemBrowser = [bool]$chkWebSys.Checked; useBundledKernel = [bool]$chkWebKernel.Checked; browserPath = $txtWebBrowser.Text.Trim() }
         logLevel = 'info'
         backupCount = 3
     }

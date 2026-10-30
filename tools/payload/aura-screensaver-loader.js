@@ -144,7 +144,7 @@
     //   而是弹出我们自己的全屏窗口加载 url。
     //   这样动画与版式完全由网页决定（CSS/JS/视频都行），
     //   不必去改官方渲染器里那 7 种写死的转场。
-    web: { enabled: false, url: '', closeOnClick: false, useSystemBrowser: false, fullscreenKiosk: false, useBundledKernel: false },
+    web: { enabled: false, url: '', closeOnClick: false, useSystemBrowser: false, useBundledKernel: false },
     logLevel: 'info',
   };
 
@@ -206,7 +206,6 @@
       if (typeof cfg.web.url !== 'string') cfg.web.url = '';
       if (typeof cfg.web.closeOnClick !== 'boolean') cfg.web.closeOnClick = false;
       if (typeof cfg.web.useSystemBrowser !== 'boolean') cfg.web.useSystemBrowser = false;
-      if (typeof cfg.web.fullscreenKiosk !== 'boolean') cfg.web.fullscreenKiosk = false;
       if (typeof cfg.web.useBundledKernel !== 'boolean') cfg.web.useBundledKernel = false;
     }
     return cfg;
@@ -801,6 +800,7 @@
         try { state.webShortcut.unregister('CommandOrControl+Alt+Q'); } catch (e) { }
         state.webShortcut = null;
       }
+      closeWebExitButton(log, state);
       // 系统浏览器模式：杀掉我们拉起来的进程（含子进程）
       if (state && state.webProc) {
         try { state.webProc.kill(); } catch (e) { }
@@ -1078,6 +1078,82 @@
   }
 
   /** 用系统浏览器（kiosk 全屏）显示网页 */
+  /**
+   * 系统浏览器是全屏 kiosk（没有任何界面），而且全局快捷键在部分机器上
+   * 注册不上。所以这里用**我们自己的 Electron** 建一个小窗口：
+   * 置顶、无边框、右下角，就一个「退出屏保」按钮，浮在 Chrome 上面。
+   *   - 不依赖 globalShortcut，也不依赖浏览器版本
+   *   - 点击 -> 哨兵导航 -> 杀掉外部浏览器进程
+   */
+  function showWebExitButton(log, state) {
+    try {
+      var el = getElectronModule();
+      if (!el || !el.BrowserWindow) { log.warn('拿不到 BrowserWindow，无法显示退出按钮'); return; }
+      closeWebExitButton(log, state);
+
+      // 用 file:// 页面（data: URL 里跳自定义协议容易被拦）
+      var dir = resolveDataFile(['seewo', 'AuraScreensaver']);
+      try { require('fs').mkdirSync(dir, { recursive: true }); } catch (e) { }
+      var page = require('path').join(dir, 'exit-btn.html');
+      var html = '<!doctype html><meta charset="utf-8"><style>' +
+        'html,body{margin:0;height:100%;overflow:hidden;background:transparent}' +
+        'a{display:flex;align-items:center;justify-content:center;height:100%;border-radius:23px;' +
+        'background:rgba(20,20,20,.78);color:#fff;font:15px/1 "Microsoft YaHei UI",sans-serif;' +
+        'text-decoration:none;border:1px solid rgba(255,255,255,.42);' +
+        'box-shadow:0 4px 18px rgba(0,0,0,.55);-webkit-app-region:no-drag}' +
+        'a:hover{background:rgba(200,30,30,.92)}</style>' +
+        '<a href="aura-close://now">退出屏保</a>';
+      try { require('fs').writeFileSync(page, html, 'utf8'); } catch (e) { }
+
+      var bw = new el.BrowserWindow({
+        width: 132, height: 44, frame: false, transparent: true, resizable: false,
+        movable: false, minimizable: false, maximizable: false, fullscreenable: false,
+        alwaysOnTop: true, skipTaskbar: true, focusable: true, show: false,
+        webPreferences: { nodeIntegration: false, contextIsolation: true }
+      });
+      try { bw.setAlwaysOnTop(true, 'screen-saver'); } catch (e) { }
+      try { bw.setVisibleOnAllWorkspaces(true); } catch (e) { }
+      try {
+        var scr = el.screen;
+        if (scr && scr.getPrimaryDisplay) {
+          var wa = scr.getPrimaryDisplay().workAreaSize;
+          bw.setPosition(Math.max(0, wa.width - 152), Math.max(0, wa.height - 64));
+        }
+      } catch (e) { }
+
+      try {
+        bw.webContents.on('will-navigate', function (ev, u) {
+          try {
+            if (u && u.indexOf('aura-close:') === 0) {
+              ev.preventDefault();
+              log.info('用户点了悬浮「退出屏保」按钮');
+              closeWebWindow(state, log);
+            }
+          } catch (e) { }
+        });
+        bw.webContents.setWindowOpenHandler(function () { return { action: 'deny' }; });
+      } catch (e) { }
+
+      bw.loadURL('file:///' + page.replace(/\\/g, '/').replace(/^\//, ''));
+      bw.once('ready-to-show', function () {
+        try { bw.showInactive(); } catch (e) { try { bw.show(); } catch (e2) { } }
+      });
+      state.webExitWin = bw;
+      log.info('已显示置顶「退出屏保」悬浮按钮（右下角）');
+    } catch (e) {
+      log.warn('创建退出悬浮按钮失败: ' + (e && e.message || e));
+    }
+  }
+
+  function closeWebExitButton(log, state) {
+    try {
+      if (state && state.webExitWin) {
+        try { state.webExitWin.destroy(); } catch (e) { }
+        state.webExitWin = null;
+      }
+    } catch (e) { }
+  }
+
   function showWebExternal(url, cfg, log, state) {
     var target = normalizeWebUrl(url);
     if (!target) return { ok: false, reason: 'empty-url', message: '没有填网页地址或本地 HTML 路径' };
@@ -1122,42 +1198,31 @@
       }
       closeWebWindow(state, log);   // 先收掉上一个（内建的或外部的）
 
-      var fullscreenKiosk = !!(cfg && cfg.web && cfg.web.fullscreenKiosk);
-      // ★ 系统浏览器才需要独立 profile（不污染用户自己的浏览记录/登录态）。
-      //   上一版插内核逻辑时把这行误删了，导致 profile is not defined，
-      //   系统浏览器这条路直接抛错并回退 —— 用户日志里就抓到了这个。
-      var profile = '';
-      if (!useKernel) {
-        profile = resolveDataFile(['seewo', 'AuraScreensaver', 'browser-profile']);
-        try { fs2.mkdirSync(profile, { recursive: true }); } catch (e) { }
-      }
-      // 记录 PID：方便 GUI / 其它工具关掉它
+      // 系统浏览器一律用全屏 kiosk（按用户要求：不要窗口模式）。
+      // kiosk 没有任何界面，所以退出靠下面那个置顶悬浮按钮 + 全局快捷键。
       var pidFile = resolveDataFile(['seewo', 'AuraScreensaver', 'web-browser.pid']);
+      // 系统浏览器才需要独立 profile（不污染用户自己的浏览记录/登录态）。
+      // 这个变量被误删过两次 —— 现在有专门用例守着（test/webScreensaver.test.js）。
+      var profile = '';
       var args;
       if (useKernel) {
-        // 我们的包装程序：自己全屏、自己注入退出按钮、自己接管 ESC
         args = [
           '--aura-url=' + target,
           '--aura-pid=' + pidFile,
           '--disable-features=Translate'
         ];
       } else {
-        // 系统浏览器：--app 应用窗口模式保留关闭按钮；
-        // kiosk 则完全没有界面，只能靠快捷键（所以才默认不用）
+        profile = resolveDataFile(['seewo', 'AuraScreensaver', 'browser-profile']);
+        try { fs2.mkdirSync(profile, { recursive: true }); } catch (e) { }
         args = [
           '--user-data-dir=' + profile,
           '--no-first-run',
           '--no-default-browser-check',
-          '--disable-session-crashed-bubble'
+          '--disable-session-crashed-bubble',
+          '--kiosk',
+          '--edge-kiosk-type=fullscreen',
+          target
         ];
-        if (fullscreenKiosk) {
-          args.push('--kiosk');
-          args.push('--edge-kiosk-type=fullscreen');
-          args.push(target);
-        } else {
-          args.push('--app=' + target);
-          args.push('--start-maximized');
-        }
       }
       var child = cp.spawn(exe, args, { detached: false, stdio: 'ignore' });
       state.webProc = child;
@@ -1185,7 +1250,7 @@
         var gs = elg && elg.globalShortcut;
         if (gs) {
           state.webShortcut = gs;
-          var accs = ['Escape', 'CommandOrControl+Alt+Q', 'CommandOrControl+Shift+Q'];
+          var accs = ['Esc', 'Escape', 'CommandOrControl+Alt+Q', 'CommandOrControl+Shift+Q'];
           for (var ai = 0; ai < accs.length; ai++) {
             try {
               if (gs.register(accs[ai], function () { closeWebWindow(state, log); })) { hotOk.push(accs[ai]); }
@@ -1193,6 +1258,8 @@
           }
         }
       } catch (e) { }
+
+      if (!useKernel) { showWebExitButton(log, state); }
 
       if (hotOk.length) {
         log.info('已注册退出快捷键: ' + hotOk.join(' / ') + '（窗口模式可直接点右上角 X）');
@@ -1217,8 +1284,8 @@
         log.info('网页屏保已用**下载的新内核**打开（我们自己的 Electron，可注入按钮）');
         log.info('  退出  : 按 ESC / Ctrl+Alt+Q，或点右下角「退出屏保」按钮');
       } else {
-        log.info('网页屏保已用系统浏览器打开（' + (fullscreenKiosk ? '全屏 kiosk' : '应用窗口，右上角有关闭按钮') + '）');
-        log.info('  退出  : ' + (fullscreenKiosk ? 'ESC / Ctrl+Alt+Q / Alt+F4' : '点右上角 X，或 Alt+F4'));
+        log.info('网页屏保已用系统浏览器全屏打开（kiosk）');
+        log.info('  退出  : 右下角置顶「退出屏保」按钮 / ESC / Ctrl+Alt+Q / Alt+F4');
       }
       log.info('  程序  : ' + exe);
       log.info('  地址  : ' + target);

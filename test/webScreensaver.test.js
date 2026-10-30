@@ -543,7 +543,8 @@ test('★★ 系统浏览器路径不能有未声明变量（曾误删 profile �
     assert.ok(!/is not defined/.test(String((r && r.message) || '')),
       '不得出现未声明变量，实际: ' + (r && r.message));
     assert.notEqual(r && r.reason, 'exception', '不该走异常分支: ' + (r && r.message));
-    assert.equal(env.created.length, 0, '不该建内建窗口');
+    // 会建一个置顶「退出屏保」悬浮按钮窗口，但**不该**有窗口加载目标网址
+    assert.ok(!env.created.some(function (w) { return String(w._url || '').indexOf('example.com') >= 0; }), '不该用内建窗口加载这个网址');
   } finally {
     env.cleanup();
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { }
