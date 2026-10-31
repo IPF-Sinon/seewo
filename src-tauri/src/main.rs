@@ -747,8 +747,6 @@ fn installed_loader_version() -> Option<String> {
     }
     None
 }
-    None
-}
 
 #[tauri::command]
 fn check_upgrade() -> Result<Value, String> {
