@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>希沃屏保配置</title>
+<link rel="stylesheet" href="app.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo"></div>
+      <div>
+        <h1>希沃屏保配置</h1>
+        <p id="subtitle">正在读取状态…</p>
+      </div>
+    </div>
+    <div class="actions">
+      <button id="btnPreview" class="btn ghost" disabled>预览屏保</button>
+      <button id="btnStop" class="btn ghost" disabled>停止预览</button>
+      <button id="btnSave" class="btn primary" disabled>保存配置</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>状态</h2>
+      <div class="kv" id="stateGrid"></div>
+      <div class="row">
+        <button id="btnPatch" class="btn primary">一键安装 / 注入</button>
+        <button id="btnUnpatch" class="btn danger">卸载还原</button>
+        <button id="btnDiag" class="btn ghost">导出诊断</button>
+      </div>
+      <p class="hint" id="adminHint"></p>
+    </section>
+
+    <section class="card">
+      <h2>屏保模式</h2>
+      <div class="segmented" id="modeSeg">
+        <label><input type="radio" name="mode" value="image" /><span>自定义图集</span></label>
+        <label><input type="radio" name="mode" value="web" /><span>网页 / 视频</span></label>
+        <label><input type="radio" name="mode" value="none" /><span>不修改图片</span></label>
+      </div>
+      <p class="hint" id="modeHint"></p>
+
+      <div id="paneImage" class="pane">
+        <label class="field">
+          <span>素材来源</span>
+          <input id="txtSource" type="text" placeholder="可留空" />
+        </label>
+        <label class="field">
+          <span>图片路径（每行一个）</span>
+          <textarea id="txtImages" rows="5" placeholder="D:\\pics\\1.jpg"></textarea>
+        </label>
+        <label class="field">
+          <span>文案（每行一条，可留空）</span>
+          <textarea id="txtTexts" rows="3"></textarea>
+        </label>
+      </div>
+
+      <div id="paneWeb" class="pane">
+        <label class="field">
+          <span>网页地址或本地文件</span>
+          <input id="txtUrl" type="text" placeholder="https://… 或 D:\\video.mp4" />
+        </label>
+        <div class="row">
+          <button id="btnPickFile" class="btn ghost">选择文件…</button>
+          <label class="check"><input id="chkSysBrowser" type="checkbox" /><span>用系统浏览器（Edge/Chrome，新内核）</span></label>
+          <label class="check"><input id="chkBundled" type="checkbox" /><span>用新内核（下载的 Chromium）</span></label>
+        </div>
+        <label class="field">
+          <span>浏览器路径（留空自动查找）</span>
+          <input id="txtBrowserPath" type="text" placeholder="留空 = 自动查找 Edge/Chrome" />
+        </label>
+        <div class="row">
+          <button id="btnPickBrowser" class="btn ghost">手动选择浏览器…</button>
+          <span id="kernelStatus" class="badge">新内核：检查中…</span>
+        </div>
+      </div>
+
+      <div id="paneNone" class="pane">
+        <p class="hint">屏保沿用集控下发的图片，下面的切换间隔 / 适配 / 转场依然生效。</p>
+        <div class="row">
+          <button id="btnOpenDefaultDir" class="btn ghost">打开默认图片目录</button>
+          <button id="btnViewDefault" class="btn ghost">查看默认图片</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>显示参数</h2>
+      <div class="grid2">
+        <label class="field">
+          <span>切换间隔（秒）</span>
+          <input id="numInterval" type="number" min="1" max="3600" value="5" />
+        </label>
+        <div class="field">
+          <span>图片适配</span>
+          <div class="segmented small">
+            <label><input type="radio" name="fit" value="0" /><span>完整显示</span></label>
+            <label><input type="radio" name="fit" value="1" /><span>铺满裁切</span></label>
+          </div>
+        </div>
+      </div>
+      <label class="field">
+        <span>转场（每张一个 0–6，逗号或换行分隔；留空 = 全部随机）</span>
+        <input id="txtTrans" type="text" placeholder="例如 0,3,5" />
+      </label>
+      <div class="row">
+        <label class="check"><input id="chkEnabled" type="checkbox" /><span>启用屏保接管</span></label>
+        <label class="check"><input id="chkLock" type="checkbox" /><span>关闭屏保后自动锁屏（官方行为）</span></label>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>工具</h2>
+      <div class="row">
+        <button class="btn ghost" data-open="logs">打开日志目录</button>
+        <button class="btn ghost" data-open="config">打开配置目录</button>
+        <button class="btn ghost" data-open="seewo">打开希沃目录</button>
+        <button class="btn ghost" data-open="kernel">打开内核目录</button>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast"></div>
+  <div id="modal" class="modal hidden"><div class="modal-box"><h3 id="modalTitle"></h3><pre id="modalBody"></pre><div class="row end"><button id="modalClose" class="btn primary">知道了</button></div></div></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

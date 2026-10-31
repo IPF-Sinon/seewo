@@ -62,3 +62,29 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*.exe
+
+  # Tauri 版界面：本地没有 Rust，靠这里编译
+  build-tauri:
+    needs: syntax-check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Build (cargo build, 不需要 Tauri CLI)
+        working-directory: src-tauri
+        run: cargo build --release --verbose
+
+      - name: Upload Tauri exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: AuraScreensaver-Tauri
+          path: src-tauri/target/release/aura-screensaver.exe
+          if-no-files-found: warn
