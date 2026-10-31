@@ -9,15 +9,21 @@
 //!   · 不依赖额外插件，减少编译面。
 
 use serde_json::{json, Map, Value};
+use tauri::{Emitter, Manager};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const LOADER_JS: &str = include_str!("../../tools/payload/aura-screensaver-loader.js");
+const KERNEL_PS1: &str = include_str!("kernel_download.ps1");
+const KERNEL_MAIN_JS: &str = include_str!("../../tools/electron-app/main.js");
+const KERNEL_PKG_JSON: &str = include_str!("../../tools/electron-app/package.json");
+const SINGLE_INSTANCE_PORT: u16 = 37651;
+const MARKER: &str = "aura-screensaver-loader";
 const INJECT_ANCHOR: &str = "n.p=\"\",n(n.s=140)}([";
 const INJECT_REPLACE: &str = "n.p=\"\",global.__AURA_REQ__=n,n(n.s=140)}([";
-const CONFIG_VERSION: &str = "2.0.0";
+const CONFIG_VERSION: &str = "2.1.0";
 
 // ===================== asar =====================
 
@@ -326,6 +332,7 @@ fn get_state() -> Result<Value, String> {
         "asarExists": asar.as_ref().map(|a| a.exists()).unwrap_or(false),
         "bakExists": bak.as_ref().map(|b| b.exists()).unwrap_or(false),
         "injected": injected,
+        "installedVersion": installed_loader_version(),
         "injectionNote": injection_note,
         "configDir": config_dir().to_string_lossy().to_string(),
         "logDir": log_dir().to_string_lossy().to_string(),
@@ -362,7 +369,7 @@ fn patch_asar() -> Result<Value, String> {
     }
     text = text.replace(INJECT_ANCHOR, INJECT_REPLACE);
     text = text.replace("\n//# sourceMappingURL=", "\n//# sourceMappingURL=");
-    text.push_str("\n;try{/* aura-screensaver-loader */\n");
+    text.push_str(&format!("\n;try{{/* {} v{} */\n", MARKER, CONFIG_VERSION));
     text.push_str(LOADER_JS);
     text.push_str("\n}catch(e){}\n");
 
@@ -527,16 +534,28 @@ fn enter_safe_mode(action: String) -> Result<Value, String> {
     if action != "install" && action != "uninstall" {
         return Err("动作只能是 install 或 uninstall".to_string());
     }
-    // 记下待办动作，程序下次启动（安全模式里双击）会自动继续
+    // 已经在安全模式里了 -> 直接干活，不要再设 bcdedit
+    if is_safe_mode() {
+        log_line("INFO", &format!("已在安全模式，直接执行 {}", action));
+        let r = if action == "uninstall" { unpatch_asar() } else { patch_asar() };
+        let _ = fs::remove_file(config_dir().join("pending-safe-action.txt"));
+        let _ = run_cmd("bcdedit.exe", &["/deletevalue", "{current}", "safeboot"]);
+        return match r {
+            Ok(v) => Ok(json!({ "ok": true, "ranNow": true, "result": v, "message": "已完成（本次已在安全模式，无需重启）" })),
+            Err(e) => Err(e),
+        };
+    }
     ensure_dir(&config_dir())?;
     fs::write(config_dir().join("pending-safe-action.txt"), &action)
         .map_err(|e| format!("写待办标记失败: {}", e))?;
+    if !is_admin() {
+        return Err("设置安全模式需要管理员权限，请右键以管理员身份运行".to_string());
+    }
     run_cmd("bcdedit.exe", &["/set", "{current}", "safeboot", "minimal"])
-        .map_err(|e| format!("设置安全模式失败（需要管理员）: {}", e))?;
+        .map_err(|e| format!("设置安全模式失败: {}", e))?;
     log_line("INFO", &format!("已设置安全模式，待办动作={}", action));
-    Ok(json!({ "ok": true }))
+    Ok(json!({ "ok": true, "ranNow": false, "message": "已安排好。请重启电脑进入安全模式，然后再次打开本程序，它会自动继续。" }))
 }
-
 #[tauri::command]
 fn is_pending_safe_action() -> Result<Value, String> {
     let p = config_dir().join("pending-safe-action.txt");
@@ -564,6 +583,195 @@ fn run_pending_safe_action() -> Result<Value, String> {
         Err(e) => Err(e),
     }
 }
+
+// ===================== 新内核 =====================
+
+/// 把内核目录下的包装程序写好（main.js / package.json）
+fn write_kernel_app() -> Result<PathBuf, String> {
+    let dir = kernel_dir();
+    let app = dir.join("resources").join("app");
+    ensure_dir(&app)?;
+    fs::write(app.join("main.js"), KERNEL_MAIN_JS).map_err(|e| format!("写 main.js 失败: {}", e))?;
+    fs::write(app.join("package.json"), KERNEL_PKG_JSON).map_err(|e| format!("写 package.json 失败: {}", e))?;
+    Ok(dir)
+}
+
+#[tauri::command]
+fn kernel_info() -> Result<Value, String> {
+    let dir = kernel_dir();
+    let exe = dir.join("electron.exe");
+    let main = dir.join("resources").join("app").join("main.js");
+    let ver = fs::read_to_string(dir.join("version.txt")).unwrap_or_default().trim().to_string();
+    let ready = exe.exists() && main.exists();
+    let mut size_mb = 0f64;
+    if dir.exists() {
+        let mut total = 0u64;
+        if let Ok(rd) = fs::read_dir(&dir) {
+            for e in rd.filter_map(|x| x.ok()) {
+                if let Ok(m) = e.metadata() {
+                    if m.is_file() {
+                        total += m.len();
+                    } else {
+                        total += dir_size(&e.path());
+                    }
+                }
+            }
+        }
+        size_mb = (total as f64) / 1048576.0;
+    }
+    Ok(json!({ "ready": ready, "version": ver, "dir": dir.to_string_lossy().to_string(), "sizeMB": (size_mb * 10.0).round() / 10.0 }))
+}
+
+fn dir_size(p: &Path) -> u64 {
+    let mut n = 0u64;
+    if let Ok(rd) = fs::read_dir(p) {
+        for e in rd.filter_map(|x| x.ok()) {
+            if let Ok(m) = e.metadata() {
+                if m.is_file() {
+                    n += m.len();
+                } else {
+                    n += dir_size(&e.path());
+                }
+            }
+        }
+    }
+    n
+}
+
+/// 后台下载新内核，通过 kernel-progress / kernel-done 事件回报进度
+#[tauri::command]
+fn download_kernel(app: tauri::AppHandle) -> Result<Value, String> {
+    let dir = write_kernel_app()?;
+    let script = dir.join("_download.ps1");
+    fs::write(&script, KERNEL_PS1).map_err(|e| format!("写下载脚本失败: {}", e))?;
+    let dir_s = dir.to_string_lossy().to_string();
+
+    let app2 = app.clone();
+    let dir2 = dir.clone();
+    std::thread::spawn(move || {
+        let spawned = Command::new("powershell.exe")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&script)
+            .arg(&dir_s)
+            .spawn();
+        let mut child = match spawned {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = app2.emit("kernel-done", json!({ "ok": false, "message": format!("启动下载失败: {}", e) }));
+                return;
+            }
+        };
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let total = fs::read_to_string(dir2.join("download.total"))
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(0);
+            let cur = fs::metadata(dir2.join("download.zip")).map(|m| m.len()).unwrap_or(0);
+            let _ = app2.emit("kernel-progress", json!({ "downloaded": cur, "total": total }));
+            match child.try_wait() {
+                Ok(Some(st)) => {
+                    let ver = fs::read_to_string(dir2.join("version.txt")).unwrap_or_default().trim().to_string();
+                    let ok = st.success() && dir2.join("electron.exe").exists();
+                    let message = if ok {
+                        format!("内核 v{} 已就绪", ver)
+                    } else {
+                        "下载失败：所有源都没成功，请检查网络后重试".to_string()
+                    };
+                    let _ = app2.emit("kernel-done", json!({ "ok": ok, "message": message, "version": ver }));
+                    return;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    let _ = app2.emit("kernel-done", json!({ "ok": false, "message": format!("{}", e) }));
+                    return;
+                }
+            }
+        }
+    });
+    Ok(json!({ "started": true, "message": "已开始下载（约 151MB，后台进行）" }))
+}
+
+// ===================== 升级检测 / 清理 =====================
+
+/// 从已注入的 main.js 里读出注入版本标记
+fn installed_loader_version() -> Option<String> {
+    let a = asar_path()?;
+    let buf = fs::read(a).ok()?;
+    let map = unpack_asar(&buf).ok()?;
+    if let Some(Entry::Data(d)) = map.get("main.js") {
+        let t = String::from_utf8_lossy(d).to_string();
+        let key = format!("/* {} v", MARKER);
+        let i = t.find(&key)?;
+        let rest = &t[i + key.len()..];
+        let end = rest.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(rest.len());
+        return Some(rest[..end].to_string());
+    }
+    None
+}
+
+#[tauri::command]
+fn check_upgrade() -> Result<Value, String> {
+    let inst = installed_loader_version();
+    let cur = CONFIG_VERSION.to_string();
+    let need = match &inst {
+        None => false,                    // 还没注入，谈不上升级
+        Some(v) => v != &cur,
+    };
+    Ok(json!({ "installed": inst, "current": cur, "needUpgrade": need }))
+}
+
+#[tauri::command]
+fn cleanup_candidates() -> Result<Value, String> {
+    let mut items: Vec<Value> = Vec::new();
+    let logs = log_dir();
+    if logs.exists() {
+        if let Ok(rd) = fs::read_dir(&logs) {
+            for e in rd.filter_map(|x| x.ok()) {
+                let p = e.path();
+                if p.is_file() {
+                    let sz = e.metadata().map(|m| m.len()).unwrap_or(0);
+                    items.push(json!({ "key": format!("log:{}", p.file_name().unwrap_or_default().to_string_lossy()), "path": p.to_string_lossy().to_string(), "label": format!("日志 {}", p.file_name().unwrap_or_default().to_string_lossy()), "size": sz }));
+                }
+            }
+        }
+    }
+    let kd = kernel_dir();
+    for n in ["download.zip", "download.total", "download.version", "_download.ps1"] {
+        let p = kd.join(n);
+        if p.exists() {
+            let sz = fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            items.push(json!({ "key": format!("kernel:{}", n), "path": p.to_string_lossy().to_string(), "label": format!("内核临时文件 {}", n), "size": sz }));
+        }
+    }
+    let p = config_dir().join("exit-btn.html");
+    if p.exists() {
+        items.push(json!({ "key": "ui:exit-btn", "path": p.to_string_lossy().to_string(), "label": "网页屏保退出按钮页面", "size": fs::metadata(&p).map(|m| m.len()).unwrap_or(0) }));
+    }
+    Ok(json!({ "items": items }))
+}
+
+#[tauri::command]
+fn do_cleanup(paths: Vec<String>) -> Result<Value, String> {
+    let mut done = 0u32;
+    let mut failed: Vec<String> = Vec::new();
+    for p in &paths {
+        let pb = PathBuf::from(p);
+        // 只允许删我们自己目录下的东西
+        let ok_dir = pb.starts_with(log_dir()) || pb.starts_with(kernel_dir()) || pb.starts_with(config_dir());
+        if !ok_dir {
+            failed.push(format!("{}（不在允许的目录内，已跳过）", p));
+            continue;
+        }
+        match fs::remove_file(&pb) {
+            Ok(_) => done += 1,
+            Err(e) => failed.push(format!("{}: {}", p, e)),
+        }
+    }
+    log_line("INFO", &format!("清理完成 {} 项", done));
+    Ok(json!({ "removed": done, "failed": failed }))
+}
+
 
 // ===================== 小工具 =====================
 
@@ -625,7 +833,39 @@ fn seewo_process_counts() -> Vec<(String, usize)> {
 }
 
 fn main() {
+    // ---- 单实例：用一个本地端口当锁 ----
+    // 第二个实例连得上就说明已有实例，请它把窗口带到前台后自己退出。
+    let listener = std::net::TcpListener::bind(("127.0.0.1", SINGLE_INSTANCE_PORT)).ok();
+    if listener.is_none() {
+        use std::io::Write;
+        if let Ok(mut s) = std::net::TcpStream::connect(("127.0.0.1", SINGLE_INSTANCE_PORT)) {
+            let _ = s.write_all(b"SHOW");
+        }
+        return;
+    }
+    let listener = listener.expect("listener");
+
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .setup(move |app| {
+            // 已有实例被再次启动时，把窗口拉到前台
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                use std::io::Read;
+                for stream in listener.incoming() {
+                    if let Ok(mut s) = stream {
+                        let mut buf = [0u8; 8];
+                        let _ = s.read(&mut buf);
+                        if let Some(w) = handle.get_webview_window("main") {
+                            let _ = w.show();
+                            let _ = w.unminimize();
+                            let _ = w.set_focus();
+                        }
+                    }
+                }
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_state,
             save_config,
@@ -639,6 +879,11 @@ fn main() {
             enter_safe_mode,
             is_pending_safe_action,
             run_pending_safe_action,
+            kernel_info,
+            download_kernel,
+            check_upgrade,
+            cleanup_candidates,
+            do_cleanup,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 启动失败");

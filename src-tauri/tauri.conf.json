@@ -1,29 +1,25 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "AuraScreensaver",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "identifier": "com.ipf-sinon.aura-screensaver",
-  "build": {
-    "frontendDist": "../ui"
-  },
+  "build": { "frontendDist": "../ui" },
   "app": {
     "withGlobalTauri": true,
     "windows": [
       {
         "label": "main",
         "title": "希沃屏保配置",
-        "width": 1000,
-        "height": 780,
-        "minWidth": 880,
-        "minHeight": 640,
+        "width": 720,
+        "height": 620,
+        "minWidth": 660,
+        "minHeight": 520,
         "center": true,
         "resizable": true,
-        "maximizable": true
+        "maximizable": false
       }
     ],
-    "security": {
-      "csp": null
-    }
+    "security": { "csp": null }
   },
   "bundle": {
     "active": true,
@@ -34,10 +30,6 @@
       "icons/128x128@2x.png",
       "icons/icon.ico"
     ],
-    "windows": {
-      "nsis": {
-        "installMode": "currentUser"
-      }
-    }
+    "windows": { "nsis": { "installMode": "currentUser" } }
   }
 }
