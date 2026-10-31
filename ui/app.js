@@ -203,7 +203,7 @@ function bind() {
 
   $('btnPatch').addEventListener('click', async function () {
     const r = await tryCall('patch_asar');
-    if (r) { toast(r.message || '注入完成', 'ok'); await refresh(); }
+    if (r) { toast(r.message || (r.upgraded ? '已升级' : '注入完成'), r.already ? undefined : 'ok'); await refresh(); }
   });
   $('btnUnpatch').addEventListener('click', async function () {
     if (!confirm('确定还原成官方版本吗？自定义屏保会失效（图片配置仍保留）。')) return;
@@ -348,7 +348,7 @@ async function boot() {
   try {
     const u = await call('check_upgrade');
     if (u && u.needUpgrade) {
-      toast('注入的是 v' + u.installed + '，当前是 v' + u.current + ' —— 建议重新注入', 'err');
+      toast('注入的是 v' + u.installed + '，当前 v' + u.current + ' —— 点「安装 / 升级注入」即可升级', 'err');
     }
   } catch (e) { }
 }

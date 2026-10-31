@@ -1,6 +1,6 @@
 [package]
 name = "aura-screensaver"
-version = "2.1.0"
+version = "2.2.0"
 description = "希沃屏保配置器"
 authors = ["IPF-Sinon"]
 edition = "2021"

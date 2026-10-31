@@ -23,7 +23,7 @@ const SINGLE_INSTANCE_PORT: u16 = 37651;
 const MARKER: &str = "aura-screensaver-loader";
 const INJECT_ANCHOR: &str = "n.p=\"\",n(n.s=140)}([";
 const INJECT_REPLACE: &str = "n.p=\"\",global.__AURA_REQ__=n,n(n.s=140)}([";
-const CONFIG_VERSION: &str = "2.1.0";
+const CONFIG_VERSION: &str = "2.2.0";
 
 // ===================== asar =====================
 
@@ -348,11 +348,23 @@ fn save_config(config: Value) -> Result<(), String> {
     Ok(())
 }
 
+/// 从 main.js 文本里读出注入版本标记
+fn marker_version(text: &str) -> Option<String> {
+    let key = format!("/* {} v", MARKER);
+    let i = text.find(&key)?;
+    let rest = &text[i + key.len()..];
+    let end = rest
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(rest.len());
+    Some(rest[..end].to_string())
+}
+
 #[tauri::command]
 fn patch_asar() -> Result<Value, String> {
     let a = asar_path().ok_or("找不到希沃安装目录")?;
     let bak = a.with_extension("asar.bak");
-    let buf = fs::read(&a).map_err(|e| format!("读取 app.asar 失败: {}（正常模式下常被希沃驱动拦写）", e))?;
+    let buf = fs::read(&a)
+        .map_err(|e| format!("读取 app.asar 失败: {}（正常模式下常被希沃驱动拦写）", e))?;
 
     let mut map = unpack_asar(&buf)?;
     let main = match map.get("main.js") {
@@ -361,14 +373,40 @@ fn patch_asar() -> Result<Value, String> {
     };
     let mut text = String::from_utf8_lossy(&main).to_string();
 
-    if text.contains("global.__AURA_REQ__") {
-        return Ok(json!({ "ok": true, "already": true, "message": "已经是注入状态，无需重复注入" }));
+    // ★ 已注入时不是「直接返回」，而是判断版本决定要不要升级。
+    //   否则装过旧版的人永远升不上来（这是上一版的真实缺口）。
+    let was_injected = text.contains("global.__AURA_REQ__");
+    let mut upgraded = false;
+    if was_injected {
+        let inst = marker_version(&text);
+        if inst.as_deref() == Some(CONFIG_VERSION) {
+            return Ok(json!({
+                "ok": true, "already": true, "upgraded": false,
+                "message": format!("已是最新版本 v{}，无需重复注入", CONFIG_VERSION)
+            }));
+        }
+        // 需要升级：必须从**官方备份**重新注入，不能在已注入的版本上叠加
+        if !bak.exists() {
+            return Err(format!(
+                "当前注入的是 {}，但目录里没有官方备份，无法安全升级。请先「卸载还原」或手动恢复官方 app.asar 后再升级。",
+                inst.unwrap_or_else(|| "未知版本".to_string())
+            ));
+        }
+        let orig = fs::read(&bak).map_err(|e| format!("读取备份失败: {}", e))?;
+        let base = unpack_asar(&orig)?;
+        let base_main = match base.get("main.js") {
+            Some(Entry::Data(d)) => d.clone(),
+            _ => return Err("备份里没有 main.js，可能备份已损坏".to_string()),
+        };
+        text = String::from_utf8_lossy(&base_main).to_string();
+        map = base;
+        upgraded = true;
     }
+
     if !text.contains(INJECT_ANCHOR) {
         return Err("找不到注入锚点，可能是希沃版本不匹配".to_string());
     }
     text = text.replace(INJECT_ANCHOR, INJECT_REPLACE);
-    text = text.replace("\n//# sourceMappingURL=", "\n//# sourceMappingURL=");
     text.push_str(&format!("\n;try{{/* {} v{} */\n", MARKER, CONFIG_VERSION));
     text.push_str(LOADER_JS);
     text.push_str("\n}catch(e){}\n");
@@ -380,8 +418,13 @@ fn patch_asar() -> Result<Value, String> {
     let out = pack_asar(&map);
     fs::write(&a, &out).map_err(|e| format!("写入 app.asar 失败: {}（请到安全模式再试）", e))?;
 
-    log_line("INFO", "注入完成");
-    Ok(json!({ "ok": true, "already": false, "size": out.len(), "message": "注入成功" }))
+    let msg = if upgraded {
+        format!("已升级到 v{}", CONFIG_VERSION)
+    } else {
+        "注入成功".to_string()
+    };
+    log_line("INFO", &msg);
+    Ok(json!({ "ok": true, "already": false, "upgraded": upgraded, "size": out.len(), "message": msg }))
 }
 
 #[tauri::command]
@@ -700,13 +743,10 @@ fn installed_loader_version() -> Option<String> {
     let buf = fs::read(a).ok()?;
     let map = unpack_asar(&buf).ok()?;
     if let Some(Entry::Data(d)) = map.get("main.js") {
-        let t = String::from_utf8_lossy(d).to_string();
-        let key = format!("/* {} v", MARKER);
-        let i = t.find(&key)?;
-        let rest = &t[i + key.len()..];
-        let end = rest.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(rest.len());
-        return Some(rest[..end].to_string());
+        return marker_version(&String::from_utf8_lossy(d));
     }
+    None
+}
     None
 }
 
