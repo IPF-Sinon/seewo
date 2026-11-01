@@ -1208,7 +1208,19 @@
       // ★ 优先用「下载的新内核」——那是我们自己的 Electron + 我们自己的 main.js，
       //   窗口属于我们，所以注入退出按钮、接管 ESC 都有效（系统浏览器不行）。
       var kernelDir = '';
-      try { kernelDir = (process.env.ProgramData || 'C:\\ProgramData') + '\\seewo\\AuraScreensaver\\kernel'; } catch (e) { }
+      try {
+        // 新位置（普通用户可写，下载落在这里）
+        var la = process.env.LOCALAPPDATA || process.env.APPDATA;
+        if (la) {
+          var k1 = la + '\\seewo\\AuraScreensaver\\kernel';
+          if (fs2.existsSync(k1 + '\\electron.exe')) { kernelDir = k1; }
+        }
+        // 老位置（以前放在 ProgramData）
+        if (!kernelDir) {
+          var k2 = (process.env.ProgramData || 'C:\\ProgramData') + '\\seewo\\AuraScreensaver\\kernel';
+          if (fs2.existsSync(k2 + '\\electron.exe')) { kernelDir = k2; } else { kernelDir = k2; }
+        }
+      } catch (e) { }
       var kernelExe = kernelDir ? (kernelDir + '\\electron.exe') : null;
       var kernelMain = kernelDir ? (kernelDir + '\\resources\\app\\main.js') : null;
       var wantKernel = !!(cfg && cfg.web && cfg.web.useBundledKernel);
@@ -1842,7 +1854,8 @@
 
           // 双保险：命令时间早于本进程启动时间的一律忽略（跨会话的旧命令）
           if (cmd.at) {
-            var atMs = Date.parse(cmd.at);
+            var atMs = (typeof cmd.atMs === 'number') ? cmd.atMs
+                     : ((typeof cmd.at === 'number') ? cmd.at : Date.parse(cmd.at));
             if (isFinite(atMs) && atMs < bridgeStartMs) {
               log.info('忽略跨会话的旧命令: ' + cmd.cmd + '（' + cmd.at + '）');
               try { fs.unlinkSync(cmdFile); } catch (e) { }

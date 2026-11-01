@@ -1,7 +1,6 @@
 'use strict';
 const T = window.__TAURI__ || {};
 const invoke = (T.core && T.core.invoke) || T.invoke;
-const dlg = T.dialog || null;
 const evt = T.event || null;
 const $ = (id) => document.getElementById(id);
 
@@ -27,13 +26,11 @@ async function tryCall(cmd, args) {
   try { return await call(cmd, args); }
   catch (e) { toast(typeof e === 'string' ? e : (e && e.message) || '操作失败', 'err'); return null; }
 }
-async function pickFile(filters) {
-  if (!dlg) { toast('文件对话框不可用', 'err'); return null; }
+async function pickFile(filter) {
   try {
-    const p = await dlg.open({ multiple: false, directory: false, filters: filters });
-    if (!p) return null;
-    return typeof p === 'string' ? p : (Array.isArray(p) ? p[0] : null);
-  } catch (e) { toast('打开对话框失败', 'err'); return null; }
+    const r = await call('pick_file', { title: '选择文件', filter: filter });
+    return r && r.path ? r.path : null;
+  } catch (e) { toast('打开对话框失败，请直接粘贴完整路径', 'err'); return null; }
 }
 function fmtSize(n) {
   if (!n) return '0 B';
@@ -126,7 +123,7 @@ function renderState() {
   $('numInterval').value = ov.switchInterval || 5;
   const fr = document.querySelector('input[name=fit][value="' + (ov.pictureSizeType === 1 ? '1' : '0') + '"]');
   if (fr) fr.checked = true;
-  $('txtTrans').value = (ov.screensaverTransitionList || []).join(',');
+  $('txtTrans').value = (ov.transitionList || ov.screensaverTransitionList || []).join(',');
 
   applyModeUI();
   document.querySelectorAll('button').forEach(function (b) {
@@ -169,7 +166,7 @@ function collectConfig() {
     textList: texts.map(function (t) { return { content: t }; }),
     switchInterval: Math.max(1, parseInt($('numInterval').value, 10) || 5),
     pictureSizeType: ((document.querySelector('input[name=fit]:checked') || {}).value === '1') ? 1 : 0,
-    screensaverTransitionList: trans
+    transitionList: trans
   };
   return base;
 }
@@ -187,7 +184,16 @@ function bind() {
   document.querySelectorAll('input[name=mode]').forEach(function (r) { r.addEventListener('change', applyModeUI); });
 
   $('btnSave').addEventListener('click', async function () {
-    try { await save(); toast('已保存，希沃下次进屏保时生效', 'ok'); }
+    try {
+      await save();
+      // 让正在运行的希沃立刻重读配置，免得非要去点一次预览
+      try { await call('send_command', { cmd: 'reloadConfig' }); } catch (e2) { }
+      if (!cfg.screensaverEnabled && cfg.mode !== 'none') {
+        toast('已保存，但未勾选「启用屏保接管」—— 配置不会生效', 'err');
+      } else {
+        toast('已保存并生效', 'ok');
+      }
+    }
     catch (e) { toast(e.message || '保存失败', 'err'); }
   });
 
@@ -238,16 +244,11 @@ function bind() {
   });
 
   $('btnPickFile').addEventListener('click', async function () {
-    const p = await pickFile([
-      { name: '网页或视频', extensions: ['html', 'htm', 'xhtml', 'mht', 'mhtml', 'svg', 'mp4', 'webm', 'ogv', 'mov', 'm4v'] },
-      { name: '网页', extensions: ['html', 'htm', 'xhtml', 'mht', 'mhtml'] },
-      { name: '视频', extensions: ['mp4', 'webm', 'ogv', 'mov', 'm4v'] },
-      { name: '所有文件', extensions: ['*'] }
-    ]);
+    const p = await pickFile('网页或视频|*.html;*.htm;*.xhtml;*.mht;*.mhtml;*.svg;*.mp4;*.webm;*.ogv;*.mov;*.m4v|所有文件|*.*');
     if (p) $('txtUrl').value = p;
   });
   $('btnPickBrowser').addEventListener('click', async function () {
-    const p = await pickFile([{ name: '浏览器程序', extensions: ['exe'] }, { name: '所有文件', extensions: ['*'] }]);
+    const p = await pickFile('浏览器程序|*.exe|所有文件|*.*');
     if (p) $('txtBrowserPath').value = p;
   });
 
@@ -283,11 +284,10 @@ async function safeFlow(action) {
     await refresh();
     return;
   }
-  const go = confirm(r.message + '\n\n现在重启电脑吗？（建议先保存其它工作）');
+  const go = confirm(r.message + '\n\n现在重启电脑吗？（建议先保存其它工作，5 秒后重启）');
   if (go) {
-    await tryCall('open_path', { which: 'seewo' });
-    toast('已安排好。重启后进入安全模式，再打开本程序会自动继续。', 'ok');
-    alert('请手动重启电脑。\n\n进入安全模式后，双击本程序，它会自动完成' + what + '并重启回正常模式。');
+    const rr = await tryCall('reboot');
+    if (rr) toast('电脑将在 5 秒后重启。进入安全模式后再打开本程序会自动继续。', 'ok');
   }
 }
 
@@ -296,6 +296,18 @@ async function safeFlow(action) {
 async function refresh() {
   STATE = await call('get_state');
   renderState();
+  try {
+    const b = await call('detect_browsers');
+    const names = (b.browsers || []).map(function (x) { return x.name; });
+    const bs = $('browserStatus');
+    if (names.length) {
+      bs.textContent = '浏览器：' + names.join(' / ');
+      bs.className = 'badge tiny ok';
+    } else {
+      bs.textContent = '浏览器：未找到 Edge/Chrome';
+      bs.className = 'badge tiny bad';
+    }
+  } catch (e) { }
   try {
     const k = await call('kernel_info');
     const el = $('kernelStatus');

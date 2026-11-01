@@ -1,6 +1,6 @@
 [package]
 name = "aura-screensaver"
-version = "2.2.0"
+version = "2.3.0"
 description = "希沃屏保配置器"
 authors = ["IPF-Sinon"]
 edition = "2021"
@@ -11,7 +11,6 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

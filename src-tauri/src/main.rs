@@ -10,6 +10,7 @@
 
 use serde_json::{json, Map, Value};
 use tauri::{Emitter, Manager};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,13 +18,14 @@ use std::process::Command;
 
 const LOADER_JS: &str = include_str!("../../tools/payload/aura-screensaver-loader.js");
 const KERNEL_PS1: &str = include_str!("kernel_download.ps1");
+const PICK_PS1: &str = include_str!("pick.ps1");
 const KERNEL_MAIN_JS: &str = include_str!("../../tools/electron-app/main.js");
 const KERNEL_PKG_JSON: &str = include_str!("../../tools/electron-app/package.json");
 const SINGLE_INSTANCE_PORT: u16 = 37651;
 const MARKER: &str = "aura-screensaver-loader";
 const INJECT_ANCHOR: &str = "n.p=\"\",n(n.s=140)}([";
 const INJECT_REPLACE: &str = "n.p=\"\",global.__AURA_REQ__=n,n(n.s=140)}([";
-const CONFIG_VERSION: &str = "2.2.0";
+const CONFIG_VERSION: &str = "2.3.0";
 
 // ===================== asar =====================
 
@@ -240,7 +242,7 @@ fn asar_path() -> Option<PathBuf> {
 
 fn default_config() -> Value {
     json!({
-        "screensaverEnabled": false,
+        "screensaverEnabled": true,
         "lockCascadeOnClose": false,
         "allowManualClose": true,
         "mode": "none",
@@ -448,13 +450,85 @@ fn send_command(cmd: String) -> Result<Value, String> {
         return Err(format!("不支持的命令: {}", cmd));
     }
     ensure_dir(&config_dir())?;
-    let payload = json!({ "cmd": cmd, "at": now_ms() as u64 });
+
+    // ★ 命令桥要求 seq 严格递增（loader: if (seq <= lastSeq) return）。
+    //   上一版根本没写 seq -> Number(undefined)=0 -> 0 <= 0 直接 return，
+    //   「预览 / 停止」永远静默失效。这是最严重的一个 bug。
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let now = now_ms() as u64;
+    let seq = loop {
+        let cur = SEQ.load(Ordering::Relaxed);
+        let next = if now > cur { now } else { cur + 1 };
+        if SEQ
+            .compare_exchange(cur, next, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            break next;
+        }
+    };
+
+    let payload = json!({
+        "seq": seq,
+        "cmd": cmd,
+        "args": {},
+        "at": iso_now(),
+        "atMs": now,
+    });
     let p = config_dir().join("command.json");
     fs::write(&p, serde_json::to_string(&payload).map_err(|e| e.to_string())?)
         .map_err(|e| format!("写命令文件失败: {}", e))?;
-    log_line("INFO", &format!("已下发命令 {}", cmd));
-    Ok(json!({ "ok": true, "message": format!("已下发 {}（若希沃未运行则不会生效）", cmd) }))
+    log_line("INFO", &format!("已下发命令 {} (seq={})", cmd, seq));
+    Ok(json!({ "ok": true, "seq": seq, "message": format!("已下发 {}", cmd) }))
 }
+
+/// 把 unix 毫秒转成 "YYYY-MM-DDTHH:MM:SS.mmmZ"（不引入 chrono）
+fn iso_now() -> String {
+    let ms = now_ms() as i64;
+    let secs = ms / 1000;
+    let millis = ms % 1000;
+    let days = secs / 86400;
+    let rem = secs % 86400;
+    let (h, mi, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        y, m, d, h, mi, s, millis
+    )
+}
+
+
+#[tauri::command]
+fn pick_file(title: Option<String>, filter: Option<String>) -> Result<Value, String> {
+    // 用 PowerShell 的原生 WinForms 对话框：不依赖 tauri-plugin-dialog，
+    // 也不需要前端打包 JS 绑定（withGlobalTauri 下插件的 JS 不保证存在）。
+    let mut p = std::env::temp_dir();
+    p.push("aura_pick_dialog.ps1");
+    fs::write(&p, PICK_PS1).map_err(|e| format!("写对话框脚本失败: {}", e))?;
+    let out = Command::new("powershell.exe")
+        .args(["-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(&p)
+        .arg("-Title")
+        .arg(title.unwrap_or_else(|| "选择文件".to_string()))
+        .arg("-Filter")
+        .arg(filter.unwrap_or_else(|| "所有文件|*.*".to_string()))
+        .output()
+        .map_err(|e| format!("打开对话框失败: {}", e))?;
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if path.is_empty() {
+        return Ok(json!({ "path": Value::Null, "cancelled": true }));
+    }
+    Ok(json!({ "path": path, "cancelled": false }))
+}
+
 
 #[tauri::command]
 fn diagnostics() -> Result<String, String> {
@@ -495,7 +569,13 @@ fn open_path(which: String) -> Result<(), String> {
         _ => return Err(format!("未知路径: {}", which)),
     };
     if !target.exists() {
-        return Err(format!("目录不存在：{}", target.display()));
+        // logs/config/kernel 是我们要用的目录，顺手建出来再打开
+        if which == "logs" || which == "config" || which == "kernel" {
+            let _ = fs::create_dir_all(&target);
+        }
+        if !target.exists() {
+            return Err(format!("目录不存在：{}", target.display()));
+        }
     }
     Command::new("explorer.exe")
         .arg(target.as_os_str())
@@ -538,7 +618,11 @@ fn list_default_images() -> Result<Value, String> {
 }
 
 fn kernel_dir() -> PathBuf {
-    PathBuf::from(std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".to_string()))
+    // 用 LOCALAPPDATA：普通用户可写。ProgramData 需要管理员，会导致下载第一步就失败。
+    let base = std::env::var("LOCALAPPDATA")
+        .or_else(|_| std::env::var("APPDATA"))
+        .unwrap_or_else(|_| "C:\\".to_string());
+    PathBuf::from(base)
         .join("seewo")
         .join("AuraScreensaver")
         .join("kernel")
@@ -588,12 +672,12 @@ fn enter_safe_mode(action: String) -> Result<Value, String> {
             Err(e) => Err(e),
         };
     }
-    ensure_dir(&config_dir())?;
-    fs::write(config_dir().join("pending-safe-action.txt"), &action)
-        .map_err(|e| format!("写待办标记失败: {}", e))?;
     if !is_admin() {
         return Err("设置安全模式需要管理员权限，请右键以管理员身份运行".to_string());
     }
+    ensure_dir(&config_dir())?;
+    fs::write(config_dir().join("pending-safe-action.txt"), &action)
+        .map_err(|e| format!("写待办标记失败: {}", e))?;
     run_cmd("bcdedit.exe", &["/set", "{current}", "safeboot", "minimal"])
         .map_err(|e| format!("设置安全模式失败: {}", e))?;
     log_line("INFO", &format!("已设置安全模式，待办动作={}", action));
@@ -684,7 +768,14 @@ fn dir_size(p: &Path) -> u64 {
 /// 后台下载新内核，通过 kernel-progress / kernel-done 事件回报进度
 #[tauri::command]
 fn download_kernel(app: tauri::AppHandle) -> Result<Value, String> {
-    let dir = write_kernel_app()?;
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+    if RUNNING.swap(true, Ordering::SeqCst) {
+        return Err("已有下载任务在进行中，请等它结束".to_string());
+    }
+    let dir = match write_kernel_app() {
+        Ok(d) => d,
+        Err(e) => { RUNNING.store(false, Ordering::SeqCst); return Err(e); }
+    };
     let script = dir.join("_download.ps1");
     fs::write(&script, KERNEL_PS1).map_err(|e| format!("写下载脚本失败: {}", e))?;
     let dir_s = dir.to_string_lossy().to_string();
@@ -701,6 +792,7 @@ fn download_kernel(app: tauri::AppHandle) -> Result<Value, String> {
             Ok(c) => c,
             Err(e) => {
                 let _ = app2.emit("kernel-done", json!({ "ok": false, "message": format!("启动下载失败: {}", e) }));
+                RUNNING.store(false, Ordering::SeqCst);
                 return;
             }
         };
@@ -722,11 +814,13 @@ fn download_kernel(app: tauri::AppHandle) -> Result<Value, String> {
                         "下载失败：所有源都没成功，请检查网络后重试".to_string()
                     };
                     let _ = app2.emit("kernel-done", json!({ "ok": ok, "message": message, "version": ver }));
+                    RUNNING.store(false, Ordering::SeqCst);
                     return;
                 }
                 Ok(None) => {}
                 Err(e) => {
                     let _ = app2.emit("kernel-done", json!({ "ok": false, "message": format!("{}", e) }));
+                    RUNNING.store(false, Ordering::SeqCst);
                     return;
                 }
             }
@@ -811,6 +905,13 @@ fn do_cleanup(paths: Vec<String>) -> Result<Value, String> {
 }
 
 
+#[tauri::command]
+fn reboot() -> Result<Value, String> {
+    // 5 秒后重启，给用户留出保存其它工作的余地
+    run_cmd("shutdown.exe", &["/r", "/t", "5", "/c", "AuraScreensaver: 重启进入安全模式"]).map_err(|e| format!("发起重启失败: {}", e))?;
+    Ok(json!({ "ok": true, "message": "电脑将在 5 秒后重启" }))
+}
+
 // ===================== 小工具 =====================
 
 fn run_cmd(program: &str, args: &[&str]) -> Result<String, String> {
@@ -884,7 +985,6 @@ fn main() {
     let listener = listener.expect("listener");
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
             // 已有实例被再次启动时，把窗口拉到前台
             let handle = app.handle().clone();
@@ -922,6 +1022,8 @@ fn main() {
             check_upgrade,
             cleanup_candidates,
             do_cleanup,
+            reboot,
+            pick_file,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 启动失败");
