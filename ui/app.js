@@ -5,6 +5,7 @@ const evt = T.event || null;
 const $ = (id) => document.getElementById(id);
 
 let STATE = null;
+let LAST_MODE = 'none';     // 记住禁用前的实际模式，便于切回
 let toastTimer = null;
 
 function toast(msg, kind) {
@@ -12,16 +13,14 @@ function toast(msg, kind) {
   el.textContent = msg;
   el.className = 'toast show' + (kind ? ' ' + kind : '');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(function () { el.className = 'toast'; }, 3000);
+  toastTimer = setTimeout(function () { el.className = 'toast'; }, 3200);
 }
 function showModal(title, body) {
   $('modalTitle').textContent = title;
   $('modalBody').textContent = body;
   $('modal').classList.remove('hidden');
 }
-async function call(cmd, args) {
-  return await invoke(cmd, args || {});
-}
+async function call(cmd, args) { return await invoke(cmd, args || {}); }
 async function tryCall(cmd, args) {
   try { return await call(cmd, args); }
   catch (e) { toast(typeof e === 'string' ? e : (e && e.message) || '操作失败', 'err'); return null; }
@@ -38,8 +37,13 @@ function fmtSize(n) {
   if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
   return (n / 1048576).toFixed(1) + ' MB';
 }
+function baseName(p) {
+  const s = String(p || '');
+  const i = Math.max(s.lastIndexOf('\\'), s.lastIndexOf('/'));
+  return i >= 0 ? s.slice(i + 1) : s;
+}
 
-// ---------------- 渲染 ----------------
+// ---------------- 模式 ----------------
 
 function currentMode() {
   const r = document.querySelector('input[name=mode]:checked');
@@ -48,20 +52,23 @@ function currentMode() {
 
 function applyModeUI() {
   const m = currentMode();
+  $('paneDisabled').hidden = m !== 'disabled';
   $('paneImage').hidden = m !== 'image';
   $('paneWeb').hidden = m !== 'web';
   $('paneNone').hidden = m !== 'none';
+  // 显示参数：只在「自定义图集 / 不修改图片」时有意义
+  $('cardParams').hidden = (m === 'web' || m === 'disabled');
+
   const hints = {
-    image: '用自己的图片替换集控下发的屏保图。转场数量要与图片数一致，留空表示随机。',
-    web: '用网页或本地视频当屏保。此模式下显示参数不生效（由网页自己决定）。',
+    disabled: '屏保将被完全关闭，不再显示任何屏保。',
+    image: '用自己的图片替换集控屏保图。转场数量要与图片数一致，留空表示随机。',
+    web: '用网页或本地视频当屏保。此模式下没有显示参数（由网页自己决定）。',
     none: '不修改图片，只调整显示参数 —— 最安全的一种。'
   };
   $('modeHint').textContent = hints[m] || '';
-  const web = (m === 'web');
-  $('numInterval').disabled = web;
-  document.querySelectorAll('input[name=fit]').forEach(function (r) { r.disabled = web; });
-  $('txtTrans').disabled = web;
 }
+
+// ---------------- 渲染 ----------------
 
 function renderState() {
   const s = STATE;
@@ -81,39 +88,40 @@ function renderState() {
 
   const grid = $('stateGrid');
   grid.innerHTML = '';
-  const rows = [
+  [
     ['希沃目录', s.seewoDir || '未找到'],
     ['app.asar', s.asarExists ? '存在' : '缺失'],
     ['备份 .bak', s.bakExists ? '存在' : '无'],
     ['注入状态', s.injected ? '已注入' : (s.injectionNote || '未注入'), s.injected ? 'ok' : 'bad'],
     ['管理员', s.isAdmin ? '是' : '否', s.isAdmin ? 'ok' : 'bad'],
     ['安全模式', s.safeMode ? '是' : '否']
-  ];
-  rows.forEach(function (r) {
+  ].forEach(function (r) {
     const dt = document.createElement('dt'); dt.textContent = r[0];
     const dd = document.createElement('dd'); dd.textContent = r[1];
     if (r[2]) dd.className = r[2];
     grid.appendChild(dt); grid.appendChild(dd);
   });
   $('adminHint').textContent = s.isAdmin ? '' :
-    '当前不是管理员：注入 / 卸载 / 安全模式都会失败，请右键「以管理员身份运行」。';
+    '当前不是管理员：安装 / 卸载会失败，请右键「以管理员身份运行」。';
   $('adminHint').className = s.isAdmin ? 'hint' : 'hint warn';
 
   const cfg = s.config || {};
-  $('chkEnabled').checked = cfg.screensaverEnabled !== false;
-  $('chkLock').checked = cfg.lockCascadeOnClose === true;
   const web = cfg.web || {};
   $('txtUrl').value = web.url || '';
   $('chkSysBrowser').checked = web.useSystemBrowser === true;
   $('chkBundled').checked = web.useBundledKernel === true;
   $('txtBrowserPath').value = web.browserPath || '';
+  $('chkLock').checked = cfg.lockCascadeOnClose === true;
 
-  let mode = cfg.mode;
-  if (mode !== 'image' && mode !== 'web' && mode !== 'none') {
-    mode = web.enabled ? 'web'
+  // 计算实际模式（配置里 mode 只存 image/web/none；禁用靠 screensaverEnabled=false）
+  let m = cfg.mode;
+  if (m !== 'image' && m !== 'web' && m !== 'none') {
+    m = web.enabled ? 'web'
       : ((cfg.override && cfg.override.imageList && cfg.override.imageList.length) ? 'image' : 'none');
   }
-  const mr = document.querySelector('input[name=mode][value=' + mode + ']');
+  LAST_MODE = m;
+  const uiMode = (cfg.screensaverEnabled === false) ? 'disabled' : m;
+  const mr = document.querySelector('input[name=mode][value=' + uiMode + ']');
   if (mr) mr.checked = true;
 
   const ov = cfg.override || {};
@@ -126,23 +134,30 @@ function renderState() {
   $('txtTrans').value = (ov.transitionList || ov.screensaverTransitionList || []).join(',');
 
   applyModeUI();
-  document.querySelectorAll('button').forEach(function (b) {
-    if (b.id && b.id !== 'modalClose') b.disabled = false;
-  });
+  document.querySelectorAll('button').forEach(function (b) { if (b.id) b.disabled = false; });
 }
 
 function collectConfig() {
   const base = JSON.parse(JSON.stringify((STATE && STATE.config) || {}));
-  const mode = currentMode();
+  const m = currentMode();
   const web = base.web || {};
-  web.enabled = (mode === 'web');
+
   web.url = $('txtUrl').value.trim();
   web.useSystemBrowser = $('chkSysBrowser').checked;
   web.useBundledKernel = $('chkBundled').checked;
   web.browserPath = $('txtBrowserPath').value.trim();
+
+  if (m === 'disabled') {
+    base.screensaverEnabled = false;
+    web.enabled = false;
+    // 记住禁用前的真实模式，切回来时不丢选择
+    base.mode = (LAST_MODE === 'image' || LAST_MODE === 'web' || LAST_MODE === 'none') ? LAST_MODE : 'none';
+  } else {
+    base.screensaverEnabled = true;
+    base.mode = m;
+    web.enabled = (m === 'web');
+  }
   base.web = web;
-  base.mode = mode;
-  base.screensaverEnabled = $('chkEnabled').checked;
   base.lockCascadeOnClose = $('chkLock').checked;
 
   const imgs = $('txtImages').value.split('\n').map(function (x) { return x.trim(); }).filter(Boolean);
@@ -152,13 +167,13 @@ function collectConfig() {
     .map(function (x) { return parseInt(x, 10); })
     .filter(function (x) { return !isNaN(x) && x >= 0 && x <= 6; });
 
-  if (mode === 'image') {
+  if (m === 'image') {
     if (imgs.length === 0) throw new Error('自定义图集模式至少要填一张图片');
     if (trans.length > 0 && trans.length !== imgs.length) {
-      throw new Error('转场有 ' + trans.length + ' 个，图片有 ' + imgs.length + ' 张 —— 数量必须一致，或留空表示随机');
+      throw new Error('转场有 ' + trans.length + ' 个，图片有 ' + imgs.length + ' 张 —— 必须一致，或留空表示随机');
     }
   }
-  if (mode === 'web' && !web.url) throw new Error('网页/视频模式需要填地址或选择文件');
+  if (m === 'web' && !web.url) throw new Error('网页/视频模式需要填地址或选择文件');
 
   base.override = {
     materialSource: $('txtSource').value.trim(),
@@ -178,7 +193,116 @@ async function save() {
   return cfg;
 }
 
+// ---------------- 图片预览 ----------------
+
+const imgCache = {};
+
+async function openImageModal(title, items, dirPath) {
+  $('imgTitle').textContent = title + '（' + items.length + ' 张）';
+  const list = $('imgList');
+  list.innerHTML = '';
+  const view = $('imgView');
+  view.removeAttribute('src');
+  const wrap = view.parentElement;
+  wrap.innerHTML = '<img id="imgView" alt="" /><div class="empty">点左侧选择一张查看</div>';
+  const w = wrap.querySelector('.empty');
+
+  const openDirBtn = $('imgOpenDir');
+  if (dirPath) {
+    openDirBtn.classList.remove('hidden');
+    openDirBtn.onclick = function () { tryCall('open_path', { which: 'defaultImages' }); };
+  } else {
+    openDirBtn.classList.add('hidden');
+  }
+
+  let activeEl = null;
+  items.forEach(function (it, idx) {
+    const el = document.createElement('div');
+    el.className = 'img-item';
+    const nm = document.createElement('span');
+    nm.textContent = it.label;
+    el.appendChild(nm);
+    if (it.size) {
+      const sz = document.createElement('span');
+      sz.className = 'sz';
+      sz.textContent = fmtSize(it.size);
+      el.appendChild(sz);
+    }
+    el.addEventListener('click', async function () {
+      if (activeEl) activeEl.classList.remove('active');
+      el.classList.add('active');
+      activeEl = el;
+      const img = wrap.querySelector('img');
+      const empty = wrap.querySelector('.empty');
+      if (empty) empty.remove();
+      if (imgCache[it.path]) { img.src = imgCache[it.path]; return; }
+      img.removeAttribute('src');
+      let d = null;
+      try { d = await call('image_data_url', { path: it.path }); }
+      catch (e) { d = null; }
+      if (d && d.dataUrl) {
+        imgCache[it.path] = d.dataUrl;
+        img.src = d.dataUrl;
+      } else {
+        wrap.innerHTML = '<div class="empty">无法预览：' + (it.path || '') + '</div>';
+      }
+    });
+    list.appendChild(el);
+    if (idx === 0) el.click();
+  });
+
+  $('imgModal').classList.remove('hidden');
+}
+
+// ---------------- 复选列表（清理） ----------------
+
+function openListModal(title, items, okText, onConfirm) {
+  $('listTitle').textContent = title;
+  const box = $('listBox');
+  box.innerHTML = '';
+  items.forEach(function (it) {
+    const row = document.createElement('label');
+    row.className = 'list-item';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = it.checked !== false;
+    cb.value = it.value;
+    const lb = document.createElement('span');
+    lb.textContent = it.label;
+    const sub = document.createElement('span');
+    sub.className = 'sub';
+    sub.textContent = it.sub || '';
+    row.appendChild(cb); row.appendChild(lb); row.appendChild(sub);
+    box.appendChild(row);
+  });
+  const ok = $('listOk');
+  ok.textContent = okText || '确定';
+  ok.onclick = async function () {
+    const chosen = Array.prototype.slice.call(box.querySelectorAll('input:checked')).map(function (c) { return c.value; });
+    $('listModal').classList.add('hidden');
+    await onConfirm(chosen);
+  };
+  $('listModal').classList.remove('hidden');
+}
+
 // ---------------- 事件 ----------------
+
+async function cleanupFlow() {
+  const r = await tryCall('cleanup_candidates');
+  if (!r) return;
+  const items = r.items || [];
+  if (!items.length) { toast('没有可清理的垃圾文件', 'ok'); return; }
+  openListModal('清理垃圾：勾选要删除的项目', items.map(function (i) {
+    return { label: i.label, sub: fmtSize(i.size), value: i.path, checked: true };
+  }), '删除选中', async function (chosen) {
+    if (!chosen.length) { toast('没有选中任何项目', 'ok'); return; }
+    const res = await tryCall('do_cleanup', { paths: chosen });
+    if (res) {
+      const bad = (res.failed && res.failed.length) || 0;
+      toast('已清理 ' + res.removed + ' 项' + (bad ? ('，' + bad + ' 项失败') : ''), bad ? 'err' : 'ok');
+    }
+  });
+}
 
 function bind() {
   document.querySelectorAll('input[name=mode]').forEach(function (r) { r.addEventListener('change', applyModeUI); });
@@ -186,15 +310,9 @@ function bind() {
   $('btnSave').addEventListener('click', async function () {
     try {
       await save();
-      // 让正在运行的希沃立刻重读配置，免得非要去点一次预览
       try { await call('send_command', { cmd: 'reloadConfig' }); } catch (e2) { }
-      if (!cfg.screensaverEnabled && cfg.mode !== 'none') {
-        toast('已保存，但未勾选「启用屏保接管」—— 配置不会生效', 'err');
-      } else {
-        toast('已保存并生效', 'ok');
-      }
-    }
-    catch (e) { toast(e.message || '保存失败', 'err'); }
+      toast('已保存并生效', 'ok');
+    } catch (e) { toast(e.message || '保存失败', 'err'); }
   });
 
   $('btnPreview').addEventListener('click', async function () {
@@ -207,32 +325,15 @@ function bind() {
     if (r) toast('已请求停止预览', 'ok');
   });
 
-  $('btnPatch').addEventListener('click', async function () {
-    const r = await tryCall('patch_asar');
-    if (r) { toast(r.message || (r.upgraded ? '已升级' : '注入完成'), r.already ? undefined : 'ok'); await refresh(); }
-  });
-  $('btnUnpatch').addEventListener('click', async function () {
-    if (!confirm('确定还原成官方版本吗？自定义屏保会失效（图片配置仍保留）。')) return;
-    const r = await tryCall('unpatch_asar');
-    if (r) { toast(r.message || '已还原', 'ok'); await refresh(); }
+  $('btnPatch').addEventListener('click', function () { safeFlow('install'); });
+  $('btnUnpatch').addEventListener('click', function () {
+    if (confirm('确定还原成官方版本吗？自定义屏保会失效（图片配置仍保留）。')) safeFlow('uninstall');
   });
   $('btnDiag').addEventListener('click', async function () {
     const s = await tryCall('diagnostics');
     if (s) showModal('诊断信息', s);
   });
-
-  $('btnSafeInstall').addEventListener('click', function () { safeFlow('install'); });
-  $('btnSafeUninstall').addEventListener('click', function () { safeFlow('uninstall'); });
-
-  $('btnCleanup').addEventListener('click', async function () {
-    const r = await tryCall('cleanup_candidates');
-    if (!r) return;
-    if (!r.items || r.items.length === 0) { toast('没有可清理的垃圾文件', 'ok'); return; }
-    const lines = r.items.map(function (i) { return '· ' + i.label + '   ' + fmtSize(i.size); }).join('\n');
-    if (!confirm('将删除以下 ' + r.items.length + ' 项：\n\n' + lines + '\n\n继续吗？')) return;
-    const res = await tryCall('do_cleanup', { paths: r.items.map(function (i) { return i.path; }) });
-    if (res) toast('已清理 ' + res.removed + ' 项' + ((res.failed && res.failed.length) ? ('，' + res.failed.length + ' 项失败') : ''), 'ok');
-  });
+  $('btnCleanup').addEventListener('click', cleanupFlow);
 
   $('btnKernel').addEventListener('click', async function () {
     if (!confirm('将下载 Electron 新内核（约 151MB，解压后约 250MB）。\n\n' +
@@ -240,7 +341,7 @@ function bind() {
       '所以能注入「退出屏保」按钮、能接管 ESC —— 内置内核太旧打不开的网站，用它就能正常打开且随时退得出。\n\n' +
       '下载源：GitHub 直连，失败自动走 gh-proxy 代理。后台进行，界面不卡。\n\n继续吗？')) return;
     const r = await tryCall('download_kernel');
-    if (r) { toast(r.message || '已开始下载', 'ok'); }
+    if (r) toast(r.message || '已开始下载', 'ok');
   });
 
   $('btnPickFile').addEventListener('click', async function () {
@@ -250,6 +351,18 @@ function bind() {
   $('btnPickBrowser').addEventListener('click', async function () {
     const p = await pickFile('浏览器程序|*.exe|所有文件|*.*');
     if (p) $('txtBrowserPath').value = p;
+  });
+  $('btnPickImages').addEventListener('click', async function () {
+    const p = await pickFile('图片/动图|*.jpg;*.jpeg;*.png;*.bmp;*.gif;*.webp;*.avif|所有文件|*.*');
+    if (p) {
+      const cur = $('txtImages').value.trim();
+      $('txtImages').value = cur ? (cur + '\n' + p) : p;
+    }
+  });
+  $('btnPreviewImages').addEventListener('click', function () {
+    const paths = $('txtImages').value.split('\n').map(function (x) { return x.trim(); }).filter(Boolean);
+    if (!paths.length) { toast('还没有填图片路径', 'err'); return; }
+    openImageModal('自定义图集', paths.map(function (p) { return { label: baseName(p), path: p }; }), null);
   });
 
   $('btnOpenDefaultDir').addEventListener('click', function () { tryCall('open_path', { which: 'defaultImages' }); });
@@ -261,10 +374,7 @@ function bind() {
       showModal('默认图片', '还没有默认图片。\n\n通常在你用希沃账号登录、集控下发过屏保图片之后才会有。');
       return;
     }
-    const body = '目录：' + r.dir + '\n共 ' + files.length + ' 张\n\n' +
-      files.slice(0, 80).map(function (f) { return f.name + '   ' + fmtSize(f.size); }).join('\n') +
-      (files.length > 80 ? '\n… 还有 ' + (files.length - 80) + ' 张' : '');
-    showModal('默认图片（' + files.length + ' 张）', body);
+    openImageModal('默认图片', files.map(function (f) { return { label: f.name, path: f.path, size: f.size }; }), r.dir);
   });
 
   document.querySelectorAll('[data-open]').forEach(function (b) {
@@ -273,19 +383,18 @@ function bind() {
 
   $('modalClose').addEventListener('click', function () { $('modal').classList.add('hidden'); });
   $('modal').addEventListener('click', function (e) { if (e.target === $('modal')) $('modal').classList.add('hidden'); });
+  $('imgClose').addEventListener('click', function () { $('imgModal').classList.add('hidden'); });
+  $('imgModal').addEventListener('click', function (e) { if (e.target === $('imgModal')) $('imgModal').classList.add('hidden'); });
+  $('listCancel').addEventListener('click', function () { $('listModal').classList.add('hidden'); });
+  $('listModal').addEventListener('click', function (e) { if (e.target === $('listModal')) $('listModal').classList.add('hidden'); });
 }
 
 async function safeFlow(action) {
   const what = action === 'uninstall' ? '卸载还原' : '安装注入';
   const r = await tryCall('enter_safe_mode', { action: action });
   if (!r) return;
-  if (r.ranNow) {
-    toast(r.message || '已完成', 'ok');
-    await refresh();
-    return;
-  }
-  const go = confirm(r.message + '\n\n现在重启电脑吗？（建议先保存其它工作，5 秒后重启）');
-  if (go) {
+  if (r.ranNow) { toast(r.message || '已完成', 'ok'); await refresh(); return; }
+  if (confirm(r.message + '\n\n现在重启电脑进入安全模式吗？（5 秒后重启，请先保存其它工作）')) {
     const rr = await tryCall('reboot');
     if (rr) toast('电脑将在 5 秒后重启。进入安全模式后再打开本程序会自动继续。', 'ok');
   }
@@ -300,13 +409,8 @@ async function refresh() {
     const b = await call('detect_browsers');
     const names = (b.browsers || []).map(function (x) { return x.name; });
     const bs = $('browserStatus');
-    if (names.length) {
-      bs.textContent = '浏览器：' + names.join(' / ');
-      bs.className = 'badge tiny ok';
-    } else {
-      bs.textContent = '浏览器：未找到 Edge/Chrome';
-      bs.className = 'badge tiny bad';
-    }
+    if (names.length) { bs.textContent = '浏览器：' + names.join(' / '); bs.className = 'badge tiny ok'; }
+    else { bs.textContent = '浏览器：未找到 Edge/Chrome'; bs.className = 'badge tiny bad'; }
   } catch (e) { }
   try {
     const k = await call('kernel_info');
@@ -324,16 +428,14 @@ async function boot() {
   if (evt) {
     evt.listen('kernel-progress', function (e) {
       const p = e.payload || {};
-      const wrap = $('kernelBarWrap');
-      wrap.classList.remove('hidden');
+      $('kernelBarWrap').classList.remove('hidden');
       const bar = $('kernelBar');
       if (p.total > 0) {
         const pct = Math.min(100, Math.floor(p.downloaded * 100 / p.total));
         bar.style.width = pct + '%';
         $('kernelStatus').textContent = '新内核：下载中 ' + pct + '%（' + fmtSize(p.downloaded) + ' / ' + fmtSize(p.total) + '）';
       } else {
-        bar.style.width = '100%';
-        bar.style.opacity = '.45';
+        bar.style.width = '100%'; bar.style.opacity = '.45';
         $('kernelStatus').textContent = '新内核：下载中 ' + fmtSize(p.downloaded);
       }
     });
@@ -349,8 +451,7 @@ async function boot() {
   try {
     const p = await call('is_pending_safe_action');
     if (p && p.pending) {
-      const go = confirm('检测到待办动作「' + p.action + '」。\n\n现在执行吗？（在安全模式里点「确定」即可完成，完成后会自动关闭安全模式）');
-      if (go) {
+      if (confirm('检测到待办动作「' + p.action + '」。\n\n现在执行吗？（完成后会自动关闭安全模式）')) {
         const r = await tryCall('run_pending_safe_action');
         if (r) { toast('已完成', 'ok'); await refresh(); }
       }
@@ -359,9 +460,7 @@ async function boot() {
 
   try {
     const u = await call('check_upgrade');
-    if (u && u.needUpgrade) {
-      toast('注入的是 v' + u.installed + '，当前 v' + u.current + ' —— 点「安装 / 升级注入」即可升级', 'err');
-    }
+    if (u && u.needUpgrade) toast('注入的是 v' + u.installed + '，当前 v' + u.current + ' —— 点「安装 / 升级注入」升级', 'err');
   } catch (e) { }
 }
 

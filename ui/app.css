@@ -90,3 +90,26 @@ input:disabled,textarea:disabled{opacity:.55;background:#f4f6fa}
 .modal-box h3{margin:0 0 10px;font-size:13.5px}
 .modal-box pre{margin:0;overflow:auto;background:#f7f9fc;border:1px solid var(--line);border-radius:8px;padding:11px;
   font:12px/1.65 ui-monospace,Consolas,monospace;white-space:pre-wrap}
+
+
+/* ---- 新增：多选列表 / 图片预览 / 模式4段 ---- */
+.segmented{flex-wrap:wrap}
+.segmented span{padding:4px 10px;font-size:12px}
+
+.modal-box.wide{width:min(860px,94vw);max-height:86vh}
+.img-split{display:grid;grid-template-columns:220px 1fr;gap:10px;min-height:300px;max-height:60vh}
+.img-list{overflow:auto;border:1px solid var(--line);border-radius:8px;background:#fafbfd}
+.img-item{padding:7px 10px;font-size:12px;cursor:pointer;border-bottom:1px solid #eef1f6;color:#334}
+.img-item:hover{background:#eef2f9}
+.img-item.active{background:#e6efff;color:var(--accent);font-weight:600}
+.img-item .sz{color:var(--dim);font-size:11px;margin-left:6px}
+.img-view{display:flex;align-items:center;justify-content:center;background:#1a1a1a;border-radius:8px;overflow:hidden}
+.img-view img{max-width:100%;max-height:100%;object-fit:contain;display:block}
+.img-view .empty{color:#889;font-size:12px}
+
+.list-box{border:1px solid var(--line);border-radius:8px;max-height:52vh;overflow:auto;margin:6px 0}
+.list-item{display:flex;align-items:center;gap:9px;padding:8px 11px;border-bottom:1px solid #eef1f6;font-size:12.5px}
+.list-item:last-child{border-bottom:none}
+.list-item input{width:15px;height:15px;accent-color:var(--accent);cursor:pointer}
+.list-item .sub{color:var(--dim);font-size:11.5px;margin-left:auto}
+

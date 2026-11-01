@@ -25,7 +25,7 @@ const SINGLE_INSTANCE_PORT: u16 = 37651;
 const MARKER: &str = "aura-screensaver-loader";
 const INJECT_ANCHOR: &str = "n.p=\"\",n(n.s=140)}([";
 const INJECT_REPLACE: &str = "n.p=\"\",global.__AURA_REQ__=n,n(n.s=140)}([";
-const CONFIG_VERSION: &str = "2.3.0";
+const CONFIG_VERSION: &str = "2.4.0";
 
 // ===================== asar =====================
 
@@ -530,6 +530,83 @@ fn pick_file(title: Option<String>, filter: Option<String>) -> Result<Value, Str
 }
 
 
+/// 读取本地图片并返回 data URL（前端直接 <img src> 显示，避免 asset protocol 的路径授权问题）
+#[tauri::command]
+fn image_data_url(path: String) -> Result<Value, String> {
+    let p = PathBuf::from(&path);
+    if !p.exists() {
+        return Err("文件不存在".to_string());
+    }
+    let md = fs::metadata(&p).map_err(|e| format!("读取信息失败: {}", e))?;
+    if !md.is_file() {
+        return Err("不是文件".to_string());
+    }
+    if md.len() > 24 * 1024 * 1024 {
+        return Err(format!("图片太大（{}），不预览", human_size(md.len())));
+    }
+    let bytes = fs::read(&p).map_err(|e| format!("读取失败: {}", e))?;
+    let ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let mime = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "svg" => "image/svg+xml",
+        "avif" => "image/avif",
+        _ => "application/octet-stream",
+    };
+    Ok(json!({
+        "dataUrl": format!("data:{};base64,{}", mime, b64_encode(&bytes)),
+        "size": md.len()
+    }))
+}
+
+fn human_size(n: u64) -> String {
+    if n < 1024 {
+        format!("{} B", n)
+    } else if n < 1048576 {
+        format!("{:.1} KB", n as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", n as f64 / 1048576.0)
+    }
+}
+
+/// 标准 base64 编码（不引第三方 crate）
+fn b64_encode(input: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut i = 0usize;
+    while i + 3 <= input.len() {
+        let n = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8) | (input[i + 2] as u32);
+        out.push(T[((n >> 18) & 63) as usize] as char);
+        out.push(T[((n >> 12) & 63) as usize] as char);
+        out.push(T[((n >> 6) & 63) as usize] as char);
+        out.push(T[(n & 63) as usize] as char);
+        i += 3;
+    }
+    let rem = input.len() - i;
+    if rem == 1 {
+        let n = (input[i] as u32) << 16;
+        out.push(T[((n >> 18) & 63) as usize] as char);
+        out.push(T[((n >> 12) & 63) as usize] as char);
+        out.push('=');
+        out.push('=');
+    } else if rem == 2 {
+        let n = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8);
+        out.push(T[((n >> 18) & 63) as usize] as char);
+        out.push(T[((n >> 12) & 63) as usize] as char);
+        out.push(T[((n >> 6) & 63) as usize] as char);
+        out.push('=');
+    }
+    out
+}
+
+
 #[tauri::command]
 fn diagnostics() -> Result<String, String> {
     let mut s = String::new();
@@ -1024,6 +1101,7 @@ fn main() {
             do_cleanup,
             reboot,
             pick_file,
+            image_data_url,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 启动失败");
