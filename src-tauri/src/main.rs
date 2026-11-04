@@ -25,7 +25,7 @@ const SINGLE_INSTANCE_PORT: u16 = 37651;
 const MARKER: &str = "aura-screensaver-loader";
 const INJECT_ANCHOR: &str = "n.p=\"\",n(n.s=140)}([";
 const INJECT_REPLACE: &str = "n.p=\"\",global.__AURA_REQ__=n,n(n.s=140)}([";
-const CONFIG_VERSION: &str = "2.6.0";
+const CONFIG_VERSION: &str = "2.6.1";
 
 // ===================== asar =====================
 
@@ -236,6 +236,18 @@ fn find_seewo_dir() -> Option<PathBuf> {
 
 fn asar_path() -> Option<PathBuf> {
     find_seewo_dir().map(|d| d.join("resources").join("app.asar"))
+}
+/// 当前 app.asar 是否处于注入状态
+fn is_injected_now() -> bool {
+    let a = match asar_path() { Some(x) => x, None => return false };
+    let buf = match fs::read(&a) { Ok(b) => b, Err(_) => return false };
+    match unpack_asar(&buf) {
+        Ok(m) => match m.get("main.js") {
+            Some(Entry::Data(d)) => String::from_utf8_lossy(d).contains("global.__AURA_REQ__"),
+            _ => false,
+        },
+        Err(_) => false,
+    }
 }
 
 // ===================== 配置 =====================
@@ -1110,13 +1122,15 @@ fn build_safe_bat(exe: &Path) -> String {
     s.push_str("\r\n");
     s.push_str("\r\n\r\n:do_install\r\n");
     s.push_str(&format!("\"{}\" --safe-install", e));
-    s.push_str("\r\n\r\n:do_uninstall\r\n");
+    s.push_str("\r\nexit /b\r\n");
+    s.push_str("\r\n:do_uninstall\r\n");
     s.push_str(&format!("\"{}\" --safe-uninstall", e));
-    s.push_str("\r\n\r\n:do_exit\r\n");
+    s.push_str("\r\nexit /b\r\n");
+    s.push_str("\r\n:do_exit\r\n");
     s.push_str(&format!("\"{}\" --exit-safe-mode", e));
     s.push_str("\r\nexit /b\r\n");
     s
-}
+
 
 #[tauri::command]
 fn prepare_safe_mode() -> Result<Value, String> {
@@ -1267,11 +1281,23 @@ fn main() {
             }
             out.push_str("\r\n");
 
-            let r = if action == "uninstall" { unpatch_asar() } else { patch_asar() };
+            // 防御：未注入时不做还原，否则可能把刚注入的覆盖掉
+            let was_injected = is_injected_now();
+            out.push_str(&format!("注入前状态: {}\r\n\r\n", if was_injected { "已注入" } else { "未注入" }));
+            let r = if action == "uninstall" {
+                if !was_injected {
+                    Ok(json!({ "message": "当前本来就没注入，无需还原" }))
+                } else {
+                    unpatch_asar()
+                }
+            } else {
+                patch_asar()
+            };
             match &r {
                 Ok(v) => out.push_str(&format!("[OK] {}\r\n", v["message"].as_str().unwrap_or("完成"))),
                 Err(e) => out.push_str(&format!("[!!] {}\r\n", e)),
             }
+            out.push_str(&format!("\r\n注入后状态: {}\r\n", if is_injected_now() { "已注入" } else { "未注入" }));
 
             let _ = fs::remove_file(&pending);
             out.push_str("\r\n正在关闭安全模式…\r\n");
