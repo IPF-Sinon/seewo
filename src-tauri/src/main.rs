@@ -25,7 +25,7 @@ const SINGLE_INSTANCE_PORT: u16 = 37651;
 const MARKER: &str = "aura-screensaver-loader";
 const INJECT_ANCHOR: &str = "n.p=\"\",n(n.s=140)}([";
 const INJECT_REPLACE: &str = "n.p=\"\",global.__AURA_REQ__=n,n(n.s=140)}([";
-const CONFIG_VERSION: &str = "2.6.1";
+const CONFIG_VERSION: &str = "2.6.2";
 
 // ===================== asar =====================
 
@@ -1130,6 +1130,7 @@ fn build_safe_bat(exe: &Path) -> String {
     s.push_str(&format!("\"{}\" --exit-safe-mode", e));
     s.push_str("\r\nexit /b\r\n");
     s
+}
 
 
 #[tauri::command]
