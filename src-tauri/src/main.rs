@@ -25,7 +25,7 @@ const SINGLE_INSTANCE_PORT: u16 = 37651;
 const MARKER: &str = "aura-screensaver-loader";
 const INJECT_ANCHOR: &str = "n.p=\"\",n(n.s=140)}([";
 const INJECT_REPLACE: &str = "n.p=\"\",global.__AURA_REQ__=n,n(n.s=140)}([";
-const CONFIG_VERSION: &str = "2.5.0";
+const CONFIG_VERSION: &str = "2.6.0";
 
 // ===================== asar =====================
 
@@ -761,7 +761,7 @@ fn enter_safe_mode(action: String) -> Result<Value, String> {
     run_cmd("bcdedit.exe", &["/set", "{current}", "safeboot", "minimal"])
         .map_err(|e| format!("设置安全模式失败: {}", e))?;
     log_line("INFO", &format!("已设置安全模式，待办动作={}", action));
-    Ok(json!({ "ok": true, "ranNow": false, "safe": safe, "message": "已安排好。重启进入安全模式后：优先双击桌面「安全模式-完成安装.bat」；如果本程序能打开，它也会自动继续。" }))
+    Ok(json!({ "ok": true, "ranNow": false, "safe": safe, "message": "已安排好。重启进入安全模式后，双击桌面「安全模式-点我.bat」并选 1 即可完成。" }))
 }
 #[tauri::command]
 fn is_pending_safe_action() -> Result<Value, String> {
@@ -992,11 +992,7 @@ fn reboot() -> Result<Value, String> {
     Ok(json!({ "ok": true, "message": "电脑将在 5 秒后重启" }))
 }
 
-// ===================== 安全模式落地脚本 =====================
-
-const SAFE_ACTION_PS1: &str = include_str!("safe_action.ps1");
-const EXIT_SAFE_PS1: &str = include_str!("exit_safe_mode.ps1");
-const PATCH_ASAR_PS1: &str = include_str!("../../tools/ps/Patch-Asar.ps1");
+// ===================== 安全模式落地（不依赖 WebView2） =====================
 
 fn safe_dir() -> PathBuf {
     config_dir().join("safe")
@@ -1010,7 +1006,6 @@ fn desktop_dir() -> Option<PathBuf> {
             return Some(d);
         }
     }
-    // OneDrive 重定向
     if let Ok(od) = std::env::var("OneDrive") {
         let d = PathBuf::from(od).join("Desktop");
         if d.exists() {
@@ -1020,51 +1015,107 @@ fn desktop_dir() -> Option<PathBuf> {
     None
 }
 
-/// 把安全模式所需的脚本全部落盘，并生成桌面快捷批处理。
-/// ★ 关键：Tauri 依赖 WebView2，而安全模式下 WebView2 常常起不来，
-///   所以必须准备一套**纯 PowerShell** 的替代入口。
+/// 生成安全模式用的**单个**批处理，并把本 exe 复制过去。
+///
+/// ★ 为什么不再用 PowerShell 脚本：
+///   1) 原来的 bat 用 Start-Process -Verb RunAs 提权，而该方式依赖
+///      Secondary Logon(seclogon) 服务 —— 安全模式下不启动，所以
+///      PowerShell 窗口一闪就报红退出（用户实测）。
+///   2) exe 自己的命令行模式最省事：纯 Rust 文件操作，零 GUI、零 WebView2、
+///      零 PowerShell 依赖。
 fn write_safe_scripts() -> Result<Value, String> {
     let dir = safe_dir();
     ensure_dir(&dir)?;
-    fs::write(dir.join("Patch-Asar.ps1"), PATCH_ASAR_PS1)
-        .map_err(|e| format!("写 Patch-Asar.ps1 失败: {}", e))?;
-    fs::write(dir.join("loader.js"), LOADER_JS)
-        .map_err(|e| format!("写 loader.js 失败: {}", e))?;
-    fs::write(dir.join("safe-action.ps1"), SAFE_ACTION_PS1)
-        .map_err(|e| format!("写 safe-action.ps1 失败: {}", e))?;
-    fs::write(dir.join("exit-safe-mode.ps1"), EXIT_SAFE_PS1)
-        .map_err(|e| format!("写 exit-safe-mode.ps1 失败: {}", e))?;
 
-    let mut made: Vec<String> = Vec::new();
-    let ps1 = dir.join("safe-action.ps1");
-    let exit_ps1 = dir.join("exit-safe-mode.ps1");
-    let bat_action = format!(
-        "@echo off\r\nchcp 65001 >nul 2>nul\r\ntitle 希沃屏保配置 - 安全模式动作\r\n\r\necho 需要管理员权限，正在提权...\r\n\r\npowershell -NoProfile -ExecutionPolicy Bypass -Command \"Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','{p}'\"\r\n",
-        p = ps1.display()
-    );
-    let bat_exit = format!(
-        "@echo off\r\nchcp 65001 >nul 2>nul\r\ntitle 退出安全模式\r\n\r\necho 正在退出安全模式并重启...\r\n\r\npowershell -NoProfile -ExecutionPolicy Bypass -Command \"Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','{p}'\"\r\n",
-        p = exit_ps1.display()
-    );
-
-    if let Some(dt) = desktop_dir() {
-        let f1 = dt.join("安全模式-完成安装.bat");
-        let f2 = dt.join("退出安全模式.bat");
-        let _ = fs::write(&f1, &bat_action);
-        let _ = fs::write(&f2, &bat_exit);
-        made.push(f1.to_string_lossy().to_string());
-        made.push(f2.to_string_lossy().to_string());
+    let safe_exe = dir.join("AuraSafe.exe");
+    let mut copied = false;
+    if let Ok(cur) = std::env::current_exe() {
+        let same = cur.to_string_lossy().to_lowercase() == safe_exe.to_string_lossy().to_lowercase();
+        if !same {
+            match fs::copy(&cur, &safe_exe) {
+                Ok(_) => copied = true,
+                Err(e) => log_line("WARN", &format!("复制 AuraSafe.exe 失败: {}", e)),
+            }
+        }
     }
-    // 配置目录里也留一份，桌面上生成失败时还能找到
-    let f3 = dir.join("安全模式-完成安装.bat");
-    let f4 = dir.join("退出安全模式.bat");
-    let _ = fs::write(&f3, &bat_action);
-    let _ = fs::write(&f4, &bat_exit);
-    made.push(f3.to_string_lossy().to_string());
-    made.push(f4.to_string_lossy().to_string());
 
-    log_line("INFO", &format!("已生成安全模式脚本 {} 个", made.len()));
-    Ok(json!({ "ok": true, "dir": dir.to_string_lossy().to_string(), "files": made }))
+    let bat = build_safe_bat(&safe_exe);
+    let mut made: Vec<String> = vec![safe_exe.to_string_lossy().to_string()];
+    if let Some(dt) = desktop_dir() {
+        let f = dt.join("安全模式-点我.bat");
+        if fs::write(&f, bat.as_bytes()).is_ok() {
+            made.push(f.to_string_lossy().to_string());
+        }
+    }
+    let f2 = dir.join("安全模式-点我.bat");
+    let _ = fs::write(&f2, bat.as_bytes());
+    made.push(f2.to_string_lossy().to_string());
+
+    // 清掉上一版留下的、会在安全模式下报错的旧脚本
+    for old in [
+        "安全模式-完成安装.bat",
+        "退出安全模式.bat",
+        "safe-action.ps1",
+        "exit-safe-mode.ps1",
+        "Patch-Asar.ps1",
+        "loader.js",
+    ] {
+        let _ = fs::remove_file(dir.join(old));
+        if let Some(dt) = desktop_dir() {
+            let _ = fs::remove_file(dt.join(old));
+        }
+    }
+
+    log_line("INFO", &format!("已生成安全模式入口 (copied={})", copied));
+    Ok(json!({ "ok": true, "dir": dir.to_string_lossy().to_string(), "files": made, "exe": safe_exe.to_string_lossy().to_string() }))
+}
+
+fn build_safe_bat(exe: &Path) -> String {
+    let e = exe.display().to_string();
+    let body = [
+        "@echo off",
+        "chcp 65001 >nul 2>nul",
+        "title 希沃屏保配置 - 安全模式操作",
+        "",
+        "whoami /groups 2>nul | findstr /C:\"S-1-16-12288\" >nul 2>&1",
+        "if errorlevel 1 (",
+        "    echo.",
+        "    echo   需要管理员权限才能写入希沃程序目录。",
+        "    echo   请关掉本窗口，右键这个文件，选「以管理员身份运行」。",
+        "    echo.",
+        "    echo   按任意键仍要继续尝试 ^(可能失败^)...",
+        "    pause >nul",
+        ")",
+        "",
+        ":menu",
+        "cls",
+        "echo.",
+        "echo   ==========================================",
+        "echo     希沃屏保配置 . 安全模式操作",
+        "echo   ==========================================",
+        "echo.",
+        "echo     [1] 完成安装 / 升级注入   ^(完成后退出安全模式并重启^)",
+        "echo     [2] 卸载还原             ^(完成后退出安全模式并重启^)",
+        "echo     [3] 仅退出安全模式并重启",
+        "echo     [4] 关闭本窗口",
+        "echo.",
+        "set /p CH=  请输入 1/2/3/4 再回车: ",
+        "if \"%CH%\"==\"1\" goto do_install",
+        "if \"%CH%\"==\"2\" goto do_uninstall",
+        "if \"%CH%\"==\"3\" goto do_exit",
+        "if \"%CH%\"==\"4\" exit /b",
+        "goto menu",
+    ];
+    let mut s = body.join("\r\n");
+    s.push_str("\r\n");
+    s.push_str("\r\n\r\n:do_install\r\n");
+    s.push_str(&format!("\"{}\" --safe-install", e));
+    s.push_str("\r\n\r\n:do_uninstall\r\n");
+    s.push_str(&format!("\"{}\" --safe-uninstall", e));
+    s.push_str("\r\n\r\n:do_exit\r\n");
+    s.push_str(&format!("\"{}\" --exit-safe-mode", e));
+    s.push_str("\r\nexit /b\r\n");
+    s
 }
 
 #[tauri::command]
@@ -1099,12 +1150,16 @@ fn run_cmd(program: &str, args: &[&str]) -> Result<String, String> {
 }
 
 fn is_admin() -> bool {
-    // 用 net session 探测（需要管理员权限才能成功）
-    Command::new("net")
-        .arg("session")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    // 用令牌完整性级别判断（High=S-1-16-12288 / System=S-1-16-16384）。
+    // 原来的 net session 依赖 Server 服务，而安全模式下该服务不启动，
+    // 会把管理员误判成「不是管理员」。
+    match Command::new("whoami.exe").arg("/groups").output() {
+        Ok(o) => {
+            let t = String::from_utf8_lossy(&o.stdout);
+            t.contains("S-1-16-12288") || t.contains("S-1-16-16384")
+        }
+        Err(_) => false,
+    }
 }
 
 fn is_safe_mode() -> bool {
@@ -1156,7 +1211,12 @@ fn main() {
     let argv: Vec<String> = std::env::args().collect();
     let has = |k: &str| argv.iter().any(|a| a == k);
 
-    if has("--prepare-safe") || has("--safe-action") || has("--exit-safe-mode") {
+    if has("--prepare-safe")
+        || has("--safe-action")
+        || has("--safe-install")
+        || has("--safe-uninstall")
+        || has("--exit-safe-mode")
+    {
         let _ = ensure_dir(&config_dir());
         let mut out = String::new();
         let mut reboot_after: u32 = 0;
@@ -1186,11 +1246,18 @@ fn main() {
             out.push_str("\r\n电脑将在 15 秒后重启。\r\n想取消：在本窗口执行 shutdown /a\r\n");
             reboot_after = 15;
         } else {
+            // 命令行开关优先（bat 菜单选 1/2 时直接指定），否则读 pending 文件
             let pending = config_dir().join("pending-safe-action.txt");
-            let action = fs::read_to_string(&pending)
-                .map(|t| t.trim().to_string())
-                .unwrap_or_else(|_| "install".to_string());
-            let action = if action == "uninstall" { "uninstall" } else { "install" };
+            let action = if has("--safe-uninstall") {
+                "uninstall".to_string()
+            } else if has("--safe-install") {
+                "install".to_string()
+            } else {
+                let t = fs::read_to_string(&pending)
+                    .map(|v| v.trim().to_string())
+                    .unwrap_or_else(|_| "install".to_string());
+                if t == "uninstall" { "uninstall".to_string() } else { "install".to_string() }
+            };
             out.push_str(&format!("待办动作: {}\r\n\r\n", action));
 
             if let Some(d) = find_seewo_dir() {
@@ -1210,7 +1277,7 @@ fn main() {
             out.push_str("\r\n正在关闭安全模式…\r\n");
             match run_cmd("bcdedit.exe", &["/deletevalue", "{current}", "safeboot"]) {
                 Ok(_) => out.push_str("  [OK] 安全模式已关闭\r\n"),
-                Err(e) => out.push_str(&format!("  [!!] 失败: {} —— 请双击桌面「退出安全模式.bat」\r\n", e)),
+                Err(e) => out.push_str(&format!("  [!!] 失败: {} —— 请双击桌面「安全模式-点我.bat」并选 3\r\n", e)),
             }
             out.push_str("\r\n电脑将在 15 秒后重启回正常模式。\r\n想取消：在本窗口执行 shutdown /a\r\n");
             reboot_after = 15;

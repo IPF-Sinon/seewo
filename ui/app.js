@@ -402,16 +402,17 @@ async function safeFlow(action) {
   const desk = files.filter(function (f) { return f.indexOf('Desktop') >= 0 || f.indexOf('桌面') >= 0; });
   lines.push('已安排好，接下来要重启进入安全模式。');
   lines.push('');
-  lines.push('【重要】安全模式下本程序的界面很可能打不开');
-  lines.push('（Tauri 依赖 WebView2，而安全模式通常加载不了它）。');
-  lines.push('所以重启后请用桌面上生成的批处理：');
+  lines.push('【重要】安全模式下本程序的界面打不开');
+  lines.push('（Tauri 依赖 WebView2，而安全模式加载不了它 —— 已验证）。');
+  lines.push('所以重启后请双击桌面上的「安全模式-点我.bat」，');
   if (desk.length) {
     desk.forEach(function (f) { lines.push('  · ' + f.replace(/^.*[\\/]/, '')); });
   } else {
-    lines.push('  · 安全模式-完成安装.bat');
+    lines.push('  · 安全模式-点我.bat');
   }
   lines.push('');
-  lines.push('它不依赖界面，双击后会提权并完成' + what + '，然后自动关掉安全模式并重启。');
+  lines.push('它会弹一个菜单，选 1 即可完成' + what + '，然后自动关掉安全模式并重启。');
+  lines.push('（这个批处理调的是 exe 的命令行模式，纯文件操作，不需要界面、也不需要 PowerShell 脚本。）');
   lines.push('');
   lines.push('（如果界面能打开，本程序也会自动继续，两条路都行。）');
   lines.push('');
@@ -419,7 +420,7 @@ async function safeFlow(action) {
 
   if (confirm(lines.join('\n'))) {
     const rr = await tryCall('reboot');
-    if (rr) toast('电脑将在 5 秒后重启。重启后请双击桌面「安全模式-完成安装.bat」', 'ok');
+    if (rr) toast('电脑将在 5 秒后重启。重启后双击桌面「安全模式-点我.bat」，菜单选 1', 'ok');
   }
 }
 
@@ -484,7 +485,7 @@ async function boot() {
   try {
     const st = await call('get_state');
     if (st && st.safeMode) {
-      toast('检测到已在安全模式 —— 若窗口显示异常，请改用桌面「安全模式-完成安装.bat」', 'err');
+      toast('已在安全模式。若界面异常，请双击桌面「安全模式-点我.bat」', 'err');
     }
   } catch (e) { }
   try {
