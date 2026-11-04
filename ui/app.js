@@ -377,6 +377,8 @@ function bind() {
     openImageModal('默认图片', files.map(function (f) { return { label: f.name, path: f.path, size: f.size }; }), r.dir);
   });
 
+  $('btnSafeDir').addEventListener('click', function () { tryCall('open_safe_dir'); });
+
   document.querySelectorAll('[data-open]').forEach(function (b) {
     b.addEventListener('click', function () { tryCall('open_path', { which: b.getAttribute('data-open') }); });
   });
@@ -394,9 +396,30 @@ async function safeFlow(action) {
   const r = await tryCall('enter_safe_mode', { action: action });
   if (!r) return;
   if (r.ranNow) { toast(r.message || '已完成', 'ok'); await refresh(); return; }
-  if (confirm(r.message + '\n\n现在重启电脑进入安全模式吗？（5 秒后重启，请先保存其它工作）')) {
+
+  const lines = [];
+  const files = (r.safe && r.safe.files) || [];
+  const desk = files.filter(function (f) { return f.indexOf('Desktop') >= 0 || f.indexOf('桌面') >= 0; });
+  lines.push('已安排好，接下来要重启进入安全模式。');
+  lines.push('');
+  lines.push('【重要】安全模式下本程序的界面很可能打不开');
+  lines.push('（Tauri 依赖 WebView2，而安全模式通常加载不了它）。');
+  lines.push('所以重启后请用桌面上生成的批处理：');
+  if (desk.length) {
+    desk.forEach(function (f) { lines.push('  · ' + f.replace(/^.*[\\/]/, '')); });
+  } else {
+    lines.push('  · 安全模式-完成安装.bat');
+  }
+  lines.push('');
+  lines.push('它不依赖界面，双击后会提权并完成' + what + '，然后自动关掉安全模式并重启。');
+  lines.push('');
+  lines.push('（如果界面能打开，本程序也会自动继续，两条路都行。）');
+  lines.push('');
+  lines.push('现在重启电脑吗？（5 秒后重启，请先保存其它工作）');
+
+  if (confirm(lines.join('\n'))) {
     const rr = await tryCall('reboot');
-    if (rr) toast('电脑将在 5 秒后重启。进入安全模式后再打开本程序会自动继续。', 'ok');
+    if (rr) toast('电脑将在 5 秒后重启。重启后请双击桌面「安全模式-完成安装.bat」', 'ok');
   }
 }
 
@@ -458,6 +481,12 @@ async function boot() {
     }
   } catch (e) { }
 
+  try {
+    const st = await call('get_state');
+    if (st && st.safeMode) {
+      toast('检测到已在安全模式 —— 若窗口显示异常，请改用桌面「安全模式-完成安装.bat」', 'err');
+    }
+  } catch (e) { }
   try {
     const u = await call('check_upgrade');
     if (u && u.needUpgrade) toast('注入的是 v' + u.installed + '，当前 v' + u.current + ' —— 点「安装 / 升级注入」升级', 'err');
