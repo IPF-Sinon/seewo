@@ -23,7 +23,7 @@ const SINGLE_INSTANCE_PORT: u16 = 37651;
 const MARKER: &str = "aura-screensaver-loader";
 const INJECT_ANCHOR: &str = "n.p=\"\",n(n.s=140)}([";
 const INJECT_REPLACE: &str = "n.p=\"\",global.__AURA_REQ__=n,n(n.s=140)}([";
-const CONFIG_VERSION: &str = "3.1.0";
+const CONFIG_VERSION: &str = "3.1.1";
 
 // ===================== asar =====================
 
