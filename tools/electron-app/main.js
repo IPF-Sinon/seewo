@@ -3,6 +3,21 @@
 // 这个窗口是我们自己的，所以注入退出按钮、接管 ESC 都有效。
 const { app, BrowserWindow, globalShortcut } = require('electron');
 const fs = require('fs');
+const pathMod = require('path');
+
+// 内核自己写日志，便于排查「打开一片空白」这类问题
+const LOG_FILE = (function () {
+  try {
+    const base = process.env.LOCALAPPDATA || process.env.APPDATA || '.';
+    const d = pathMod.join(base, 'seewo', 'AuraScreensaver', 'logs');
+    fs.mkdirSync(d, { recursive: true });
+    return pathMod.join(d, 'kernel.log');
+  } catch (e) { return null; }
+})();
+function klog(msg) {
+  try { if (LOG_FILE) fs.appendFileSync(LOG_FILE, new Date().toISOString() + '  ' + msg + '\n'); } catch (e) { }
+}
+klog('=== kernel start, argv=' + JSON.stringify(process.argv.slice(1)));
 
 function argVal(name) {
   const p = '--' + name + '=';
@@ -42,6 +57,7 @@ function inject() {
 }
 
 app.whenReady().then(function () {
+  klog('app ready');
   win = new BrowserWindow({
     fullscreen: true,
     frame: false,
@@ -79,10 +95,14 @@ app.whenReady().then(function () {
   wc.on('did-finish-load', inject);
   wc.on('did-navigate-in-page', inject);
 
-  win.once('ready-to-show', function () { try { win.show(); } catch (e) { } });
+  win.once('ready-to-show', function () { try { win.show(); klog('window shown'); } catch (e) { } });
+  wc.on('did-finish-load', function () { klog('did-finish-load'); });
+  wc.on('did-fail-load', function (ev, code, desc, u) { klog('did-fail-load ' + code + ' ' + desc + ' ' + u); });
+  wc.on('render-process-gone', function (ev, d) { klog('render-process-gone ' + JSON.stringify(d)); });
   win.on('closed', function () { quit(); });
 
-  if (URL_) { win.loadURL(URL_); }
+  klog('target url = ' + URL_);
+  if (URL_) { win.loadURL(URL_).catch(function (e) { klog('loadURL 失败: ' + e.message); }); } else { klog('[!!] URL_ 为空，窗口会是空白'); }
 
   // 5) 全局快捷键兜底
   try { globalShortcut.register('CommandOrControl+Alt+Q', quit); } catch (e) { }

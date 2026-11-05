@@ -1,6 +1,6 @@
 [package]
 name = "aura-screensaver"
-version = "3.1.1"
+version = "3.2.0"
 description = "希沃屏保配置器"
 authors = ["IPF-Sinon"]
 edition = "2021"
@@ -23,3 +23,6 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }

@@ -514,7 +514,9 @@
           // ★ 自定义无操作超时：idleMinutes>0 时官方那套计时我们不要，
           //   由 installIdleTimer 自己驱动（否则两边会各触发一次）。
           var __cidle = Number(cfg.idleMinutes);
-          if (isFinite(__cidle) && __cidle > 0 && !state.idleSelfTrigger) {
+          // ★ 必须也检查 previewBypass：手动预览是明确的用户动作，
+          //   否则勾了自定义超时后「预览」会被自己的超时逻辑拦掉。
+          if (isFinite(__cidle) && __cidle > 0 && !state.idleSelfTrigger && !state.previewBypass) {
             state.blocked++;
             log.info('已按自定义无操作超时拦截官方屏保触发（自定义 ' + __cidle + ' 分钟）');
             return;
@@ -590,6 +592,20 @@
                 var __delay = __n * __iv + 1;
                 state.shuffleTimer = setTimeout(function () {
                   try {
+                    // 关键：只有用户仍然空闲（说明屏保还在）才重新打乱。
+                    // 重新打乱的做法是「再发一次 onMessage」，而 onMessage 会让屏保重新显示；
+                    // 若用户早就关了屏保，这一下就会凭空把屏保弹出来。
+                    // 用户实测「没设超时却约 5 分钟后莫名弹屏保，而且我一直在操作」
+                    // —— 20 张 x 15 秒 + 1 = 301 秒，正好对上。
+                    var el2 = getElectronModule();
+                    var pm2 = el2 && el2.powerMonitor;
+                    var idle2 = (pm2 && typeof pm2.getSystemIdleTime === "function")
+                      ? Number(pm2.getSystemIdleTime()) : -1;
+                    if (idle2 >= 0 && idle2 < 10) {
+                      log.info("随机模式：检测到用户正在操作（空闲 " + idle2 + " 秒），取消本次重新打乱");
+                      state.shuffleTimer = null;
+                      return;
+                    }
                     var p2 = JSON.parse(JSON.stringify(forwarded.data));
                     if (Array.isArray(p2.imageList)) { shuffleInPlace(p2.imageList); }
                     if (Array.isArray(p2.transitionList)) { shuffleInPlace(p2.transitionList); }
@@ -939,12 +955,22 @@
           var fsv2 = require('fs');
           if (fsv2.existsSync(pf2)) {
             var pid2 = String(fsv2.readFileSync(pf2, 'utf8')).trim();
+            var killed = false;
             if (/^[0-9]+$/.test(pid2)) {
               log.warn('没有进程句柄，按 PID 文件兜底杀 pid=' + pid2);
-              require('child_process').spawn('taskkill.exe', ['/PID', pid2, '/T', '/F'], { stdio: 'ignore' });
+              // 同步执行并读回结果：异步 spawn 看不到成败，出了问题无从判断
+              var rr2 = require('child_process').spawnSync('taskkill.exe', ['/PID', pid2, '/T', '/F'],
+                { encoding: 'utf8', timeout: 8000, windowsHide: true });
+              var oo2 = String((rr2 && rr2.stdout) || '') + String((rr2 && rr2.stderr) || '');
+              if (rr2 && rr2.status === 0) {
+                log.info('按 PID 兜底成功，已结束 pid=' + pid2);
+                killed = true;
+              } else {
+                log.warn('按 PID 兜底失败: ' + oo2.trim().slice(0, 160));
+              }
             }
             try { fsv2.unlinkSync(pf2); } catch (e2) { }
-            killBrowserByProfile(state && state.webProfile, log);
+            if (!killed) { killBrowserByProfile(state && state.webProfile, log); }
           } else {
             if (!killBrowserByProfile(state && state.webProfile, log)) {
               log.warn('关闭网页屏保：句柄 / PID / profile 三种方式都没能关闭外部浏览器');
@@ -1994,6 +2020,9 @@
 
     control.stop = function () {
       try {
+        // 关屏保时也要取消随机模式的重新打乱定时器，
+        // 否则到点会再发一次 onMessage 把屏保重新弹出来。
+        if (state.shuffleTimer) { try { clearTimeout(state.shuffleTimer); } catch (e0) { } state.shuffleTimer = null; }
         if (!controller) return { ok: false, reason: 'no-controller', message: '屏保控制器(120)未就绪' };
         if (typeof controller.stopScreensaver !== 'function') return { ok: false, reason: 'no-stop-method' };
         controller.stopScreensaver();

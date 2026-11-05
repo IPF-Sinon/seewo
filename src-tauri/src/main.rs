@@ -23,7 +23,7 @@ const SINGLE_INSTANCE_PORT: u16 = 37651;
 const MARKER: &str = "aura-screensaver-loader";
 const INJECT_ANCHOR: &str = "n.p=\"\",n(n.s=140)}([";
 const INJECT_REPLACE: &str = "n.p=\"\",global.__AURA_REQ__=n,n(n.s=140)}([";
-const CONFIG_VERSION: &str = "3.1.1";
+const CONFIG_VERSION: &str = "3.2.0";
 
 // ===================== asar =====================
 
@@ -308,6 +308,9 @@ fn now_ms() -> u128 {
 
 #[tauri::command]
 fn get_state() -> Result<Value, String> {
+    // 顺手把内核包装程序刷新成当前版本：用户的 kernel 目录可能是很早下载的，
+    // 里面那份 resources/app/main.js 还是旧的（「打开一片空白」很可能就是这个）。
+    let _ = write_kernel_app();
     let dir = find_seewo_dir();
     let asar = dir.as_ref().map(|d| d.join("resources").join("app.asar"));
     let bak = asar.as_ref().map(|a| a.with_extension("asar.bak"));
@@ -844,13 +847,12 @@ fn enter_safe_mode(action: String) -> Result<Value, String> {
     ensure_dir(&config_dir())?;
     fs::write(config_dir().join("pending-safe-action.txt"), &action)
         .map_err(|e| format!("写待办标记失败: {}", e))?;
-    // ★ 先把纯 PowerShell 版脚本和桌面批处理准备好，再重启。
-    //   因为安全模式下 WebView2 常常起不来，GUI 很可能打不开。
-    let safe = write_safe_scripts().unwrap_or_else(|_| json!({}));
+    // ★ 不在这里写脚本：用户还没确认要重启，先落盘桌面批处理属于「误触就有副作用」。
+    //   改由界面在确认之后调用 prepare_safe_mode。
     run_cmd("bcdedit.exe", &["/set", "{current}", "safeboot", "minimal"])
         .map_err(|e| format!("设置安全模式失败: {}", e))?;
     log_line("INFO", &format!("已设置安全模式，待办动作={}", action));
-    Ok(json!({ "ok": true, "ranNow": false, "safe": safe, "message": "已安排好。重启进入安全模式后，双击桌面「安全模式-点我.bat」并选 1 即可完成。" }))
+    Ok(json!({ "ok": true, "ranNow": false, "message": "已安排好。重启进入安全模式后，双击桌面「安全模式-点我.bat」并选 1 即可完成。" }))
 }
 #[tauri::command]
 fn is_pending_safe_action() -> Result<Value, String> {
@@ -1221,6 +1223,38 @@ fn check_upgrade() -> Result<Value, String> {
 
 /// 列出本程序制造的所有可清理文件，并说明用途。
 /// 只列「删了不影响功能」的东西；配置文件本身不列（那是用户的设置）。
+#[tauri::command]
+fn relaunch_as_admin() -> Result<Value, String> {
+    // 只在需要的时候提权（点安装 / 安全模式），而不是启动就弹 UAC。
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        let exe = std::env::current_exe().map_err(|e| format!("取自身路径失败: {}", e))?;
+        let to_w = |t: &str| -> Vec<u16> { t.encode_utf16().chain(std::iter::once(0)).collect() };
+        let exe_w = to_w(&exe.to_string_lossy());
+        let op_w = to_w("runas");
+        let r = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                op_w.as_ptr(),
+                exe_w.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        if (r as isize) <= 32 {
+            return Err("提权被取消或失败".to_string());
+        }
+        log_line("INFO", "已请求以管理员身份重新启动");
+        return Ok(json!({ "ok": true, "message": "已以管理员身份重新启动，请在新窗口继续" }));
+    }
+    #[cfg(not(windows))]
+    {
+        Err("仅 Windows 支持".to_string())
+    }
+}
 #[tauri::command]
 fn cleanup_candidates() -> Result<Value, String> {
     let mut items: Vec<Value> = Vec::new();
@@ -1747,6 +1781,7 @@ fn main() {
             kernel_info,
             download_kernel,
             speedtest_mirrors,
+            relaunch_as_admin,
             check_upgrade,
             cleanup_candidates,
             do_cleanup,
