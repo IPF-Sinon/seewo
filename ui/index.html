@@ -70,8 +70,12 @@
           </div>
         </label>
         <div class="row tight">
-          <label class="check"><input id="chkSysBrowser" type="checkbox" /><span>用系统浏览器</span></label>
-          <label class="check"><input id="chkBundled" type="checkbox" /><span>用新内核</span></label>
+          <span class="hint" style="margin:0">网页引擎</span>
+          <div class="segmented small">
+            <label><input type="radio" name="engine" value="inner" /><span>内置内核</span></label>
+            <label><input type="radio" name="engine" value="system" /><span>系统浏览器</span></label>
+            <label><input type="radio" name="engine" value="kernel" /><span>新内核</span></label>
+          </div>
           <span id="browserStatus" class="badge tiny">浏览器：检测中…</span>
           <span id="kernelStatus" class="badge tiny">新内核：检查中…</span>
           <button id="btnKernel" class="btn ghost tiny">下载新内核…</button>

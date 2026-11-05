@@ -23,7 +23,7 @@ const SINGLE_INSTANCE_PORT: u16 = 37651;
 const MARKER: &str = "aura-screensaver-loader";
 const INJECT_ANCHOR: &str = "n.p=\"\",n(n.s=140)}([";
 const INJECT_REPLACE: &str = "n.p=\"\",global.__AURA_REQ__=n,n(n.s=140)}([";
-const CONFIG_VERSION: &str = "2.8.0";
+const CONFIG_VERSION: &str = "2.9.0";
 
 // ===================== asar =====================
 
@@ -1125,34 +1125,115 @@ fn check_upgrade() -> Result<Value, String> {
     Ok(json!({ "installed": inst, "current": cur, "needUpgrade": need }))
 }
 
+/// 列出本程序制造的所有可清理文件，并说明用途。
+/// 只列「删了不影响功能」的东西；配置文件本身不列（那是用户的设置）。
 #[tauri::command]
 fn cleanup_candidates() -> Result<Value, String> {
     let mut items: Vec<Value> = Vec::new();
-    let logs = log_dir();
-    if logs.exists() {
-        if let Ok(rd) = fs::read_dir(&logs) {
+
+    let mut push = |path: PathBuf, group: &str, label: &str, purpose: &str| {
+        if path.exists() {
+            let size = if path.is_dir() { dir_size(&path) } else { fs::metadata(&path).map(|m| m.len()).unwrap_or(0) };
+            items.push(json!({
+                "path": path.to_string_lossy().to_string(),
+                "group": group,
+                "label": label,
+                "purpose": purpose,
+                "size": size,
+                "isDir": path.is_dir(),
+            }));
+        }
+    };
+
+    let cd = config_dir();
+    let ld = log_dir();
+
+    // ---- 日志 ----
+    if ld.exists() {
+        if let Ok(rd) = fs::read_dir(&ld) {
             for e in rd.filter_map(|x| x.ok()) {
                 let p = e.path();
                 if p.is_file() {
-                    let sz = e.metadata().map(|m| m.len()).unwrap_or(0);
-                    items.push(json!({ "key": format!("log:{}", p.file_name().unwrap_or_default().to_string_lossy()), "path": p.to_string_lossy().to_string(), "label": format!("日志 {}", p.file_name().unwrap_or_default().to_string_lossy()), "size": sz }));
+                    push(p, "日志", "日志文件", "排查问题用，删掉不影响功能");
                 }
             }
         }
     }
-    let kd = kernel_dir();
-    for n in ["download.zip"] {
-        let p = kd.join(n);
-        if p.exists() {
-            let sz = fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
-            items.push(json!({ "key": format!("kernel:{}", n), "path": p.to_string_lossy().to_string(), "label": format!("内核临时文件 {}", n), "size": sz }));
+    push(cd.join("aura-gui.log"), "日志", "旧位置日志", "早期版本的界面日志");
+    push(cd.join("safe-action.log"), "日志", "安全模式动作日志", "命令行模式执行时写的结果");
+    push(cd.join("ui-error.log"), "日志", "界面异常日志", "界面上未处理异常的记录");
+
+    // ---- 临时/运行时文件 ----
+    push(cd.join("command.json"), "运行时", "命令桥命令文件", "临时的预览/停止指令，正常情况下用完即删");
+    push(cd.join("command-result.json"), "运行时", "命令桥结果文件", "加载器回写的执行结果");
+    push(cd.join("web-browser.pid"), "运行时", "网页屏保进程号", "用来关闭系统浏览器；网页屏保没在跑时是残留");
+    push(cd.join("exit-btn.html"), "运行时", "悬浮退出按钮页面", "系统浏览器模式下那个置顶小按钮的页面");
+    push(cd.join("video.html"), "运行时", "视频包装页面", "把视频文件包成全屏循环播放的页面");
+    push(cd.join("kill-browser.ps1"), "运行时", "浏览器清理脚本", "三层兜底关闭时生成的临时脚本");
+    push(cd.join("pending-safe-action.txt"), "运行时", "安全模式待办标记", "记录还要不要注入/卸载；已经完成后可删");
+
+    // ---- 浏览器独立配置目录（可能很大）----
+    if cd.exists() {
+        if let Ok(rd) = fs::read_dir(&cd) {
+            let mut profiles: Vec<PathBuf> = rd
+                .filter_map(|x| x.ok())
+                .map(|x| x.path())
+                .filter(|p| {
+                    p.is_dir()
+                        && p.file_name()
+                            .map(|n| n.to_string_lossy().starts_with("browser-profile"))
+                            .unwrap_or(false)
+                })
+                .collect();
+            profiles.sort();
+            for p in profiles {
+                push(p, "浏览器配置", "浏览器独立配置目录", "给系统浏览器用的独立 profile，不碰你自己的浏览记录；关掉屏保后可删");
+            }
         }
     }
-    let p = config_dir().join("exit-btn.html");
-    if p.exists() {
-        items.push(json!({ "key": "ui:exit-btn", "path": p.to_string_lossy().to_string(), "label": "网页屏保退出按钮页面", "size": fs::metadata(&p).map(|m| m.len()).unwrap_or(0) }));
+
+    // ---- 安全模式入口 ----
+    let sd = safe_dir();
+    push(sd.join("AuraSafe.exe"), "安全模式", "安全模式用的程序副本", "约 3.5MB。桌面批处理调用它；下次点安装会重新生成");
+    push(sd.join("安全模式-点我.bat"), "安全模式", "安全模式批处理（副本）", "配置目录里的那份，桌面还有一份");
+    if let Some(dt) = desktop_dir() {
+        push(dt.join("安全模式-点我.bat"), "安全模式", "桌面安全模式批处理", "重启进安全模式后双击它完成安装；装完可删");
     }
-    Ok(json!({ "items": items }))
+
+    // ---- 新内核 ----
+    let kd = kernel_dir();
+    push(kd.join("download.zip"), "新内核", "内核下载临时包", "约 150MB，下载过程中才有；中断会残留");
+    push(kd.join("electron.exe"), "新内核", "新内核主体（整个目录）", "约 250MB。删掉后网页屏保会回退到系统浏览器");
+    push(kd.join("version.txt"), "新内核", "内核版本记录", "记录下载的是哪个 Electron 版本");
+
+    // 目录型条目去重（内核目录只报一次）
+    if kd.exists() {
+        let has_zip = kd.join("download.zip").exists();
+        let has_exe = kd.join("electron.exe").exists();
+        if has_exe {
+            items.retain(|i| i["path"].as_str() != Some(kd.join("electron.exe").to_string_lossy().as_ref()));
+            let size = dir_size(&kd);
+            items.push(json!({
+                "path": kd.to_string_lossy().to_string(),
+                "group": "新内核",
+                "label": "新内核目录（整个删掉）",
+                "purpose": "约 250MB。删掉后网页屏保回退到系统浏览器；下次用可重新下载",
+                "size": size,
+                "isDir": true,
+            }));
+        }
+        let _ = has_zip;
+    }
+
+    // 删除顺序：先小文件后目录，方便阅读
+    items.sort_by(|a, b| {
+        let ga = a["group"].as_str().unwrap_or("");
+        let gb = b["group"].as_str().unwrap_or("");
+        ga.cmp(gb)
+    });
+
+    let total: u64 = items.iter().filter_map(|i| i["size"].as_u64()).sum();
+    Ok(json!({ "items": items, "totalSize": total }))
 }
 
 #[tauri::command]

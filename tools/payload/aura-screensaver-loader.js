@@ -794,22 +794,57 @@
 
   /**
    * 第三层兜底：按 profile 路径查找并杀掉浏览器进程。
-   * 用在「进程句柄没了、PID 也失效」的情况 ——
-   * 典型场景：复用同一 profile 时，新起的 chrome.exe 只给已存在的实例发了
-   * 个信号就自己退出，我们手里那个句柄指向的其实是个早已结束的启动器进程。
+   *
+   * ★ 这里踩过一个坑：原来是把命令拼成 -Command 字符串，
+   *   并且把 profile 里的反斜杠「加倍」了（profile.replace(/\\/g,'\\\\')）。
+   *   但 PowerShell 的扫描引号字符串里反斜杠本来就是字面量，
+   *   于是变成去匹配 C:\\Users\\... 这种双反斜杠，真实命令行永远匹配不上，
+   *   结果三层兜底全部落空（用户日志：三种方式都没能关闭）。
+   *   现在改成**写一个独立 .ps1 文件再 -File 执行**，
+   *   既没有反斜杠问题，也没有内联引号问题。
    */
   function killBrowserByProfile(profile, log) {
-    if (!profile) return false;
+    if (!profile) {
+      log.warn('按 profile 兜底：没有 profile 信息，跳过');
+      return false;
+    }
     try {
+      var fsk = require('fs');
+      var pathk = require('path');
       var cp = require('child_process');
-      var safe = String(profile).replace(/\\/g, '\\\\');
-      var ps = 'Get-CimInstance Win32_Process | Where-Object { ' +
-        '($_.Name -eq \'chrome.exe\' -or $_.Name -eq \'msedge.exe\') -and ' +
-        '$_.CommandLine -and $_.CommandLine.Contains(\'' + safe + '\') } | ' +
-        'ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }';
-      cp.spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], { stdio: 'ignore' });
-      log.warn('已按 profile 兜底清理浏览器进程: ' + profile);
-      return true;
+      var dir = resolveDataFile(['seewo', 'AuraScreensaver']);
+      try { fsk.mkdirSync(dir, { recursive: true }); } catch (e) { }
+      var psFile = pathk.join(dir, 'kill-browser.ps1');
+
+      // PowerShell 单引号字符串里，单引号本身用两个单引号转义
+      var lit = String(profile).replace(/'/g, "''");
+      var script = [
+        '$pat = ' + "'" + lit + "'",
+        '$n = 0',
+        "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |",
+        "  Where-Object { ($_.Name -eq 'chrome.exe' -or $_.Name -eq 'msedge.exe') -and $_.CommandLine -and $_.CommandLine.Contains($pat) } |",
+        '  ForEach-Object {',
+        '    try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop; $n++ } catch { }',
+        '  }',
+        "Write-Output ('KILLED=' + $n)",
+        '',
+      ].join("\n");
+      fsk.writeFileSync(psFile, script, 'utf8');
+
+      // 同步执行并读回结果：这样日志能直接告诉我们杀掉了几个进程，
+      // 而不是「已发起」却不知道有没有用。
+      var r = cp.spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', psFile], {
+        encoding: 'utf8',
+        timeout: 10000,
+      });
+      var txt = String((r && r.stdout) || '') + String((r && r.stderr) || '');
+      var mm = txt.match(/KILLED=([0-9]+)/);
+      if (mm) {
+        log.info('按 profile 兜底：实际杀掉了 ' + mm[1] + ' 个浏览器进程');
+        return true;
+      }
+      log.warn('按 profile 兜底未确认结果: ' + txt.slice(0, 200));
+      return false;
     } catch (e) {
       log.warn('按 profile 兜底清理失败: ' + (e && e.message || e));
       return false;
@@ -1250,7 +1285,13 @@
       } catch (e) { }
       var kernelExe = kernelDir ? (kernelDir + '\\electron.exe') : null;
       var kernelMain = kernelDir ? (kernelDir + '\\resources\\app\\main.js') : null;
-      var wantKernel = !!(cfg && cfg.web && cfg.web.useBundledKernel);
+      // 优先用新的三选一 engine；没有就回落到旧的两个布尔标志
+      var engine = (cfg && cfg.web && cfg.web.engine) || '';
+      if (engine !== 'kernel' && engine !== 'system' && engine !== 'inner') {
+        engine = (cfg && cfg.web && cfg.web.useBundledKernel) ? 'kernel'
+               : ((cfg && cfg.web && cfg.web.useSystemBrowser) ? 'system' : 'inner');
+      }
+      var wantKernel = (engine === 'kernel');
       var useKernel = false;
       var exe = null;
       if (wantKernel) {

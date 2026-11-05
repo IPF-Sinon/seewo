@@ -109,8 +109,13 @@ function renderState() {
   const cfg = s.config || {};
   const web = cfg.web || {};
   $('txtUrl').value = web.url || '';
-  $('chkSysBrowser').checked = web.useSystemBrowser === true;
-  $('chkBundled').checked = web.useBundledKernel === true;
+  // 引擎三选一（向后兼容旧的 useSystemBrowser / useBundledKernel）
+  let eng = web.engine;
+  if (eng !== 'inner' && eng !== 'system' && eng !== 'kernel') {
+    eng = web.useBundledKernel ? 'kernel' : (web.useSystemBrowser ? 'system' : 'inner');
+  }
+  const er = document.querySelector('input[name=engine][value="' + eng + '"]');
+  if (er) er.checked = true;
   $('txtBrowserPath').value = web.browserPath || '';
   $('chkLock').checked = cfg.lockCascadeOnClose === true;
 
@@ -144,8 +149,10 @@ function collectConfig() {
   const web = base.web || {};
 
   web.url = $('txtUrl').value.trim();
-  web.useSystemBrowser = $('chkSysBrowser').checked;
-  web.useBundledKernel = $('chkBundled').checked;
+  const eng = (document.querySelector('input[name=engine]:checked') || {}).value || 'inner';
+  web.engine = eng;
+  web.useSystemBrowser = (eng === 'system');
+  web.useBundledKernel = (eng === 'kernel');
   web.browserPath = $('txtBrowserPath').value.trim();
 
   if (m === 'disabled') {
@@ -268,12 +275,22 @@ function openListModal(title, items, okText, onConfirm) {
     cb.type = 'checkbox';
     cb.checked = it.checked !== false;
     cb.value = it.value;
-    const lb = document.createElement('span');
+    const wrap = document.createElement('div');
+    wrap.className = 'li-main';
+    const lb = document.createElement('div');
+    lb.className = 'li-label';
     lb.textContent = it.label;
+    wrap.appendChild(lb);
+    if (it.note) {
+      const nt = document.createElement('div');
+      nt.className = 'li-note';
+      nt.textContent = it.note;
+      wrap.appendChild(nt);
+    }
     const sub = document.createElement('span');
     sub.className = 'sub';
     sub.textContent = it.sub || '';
-    row.appendChild(cb); row.appendChild(lb); row.appendChild(sub);
+    row.appendChild(cb); row.appendChild(wrap); row.appendChild(sub);
     box.appendChild(row);
   });
   const ok = $('listOk');
@@ -293,8 +310,17 @@ async function cleanupFlow() {
   if (!r) return;
   const items = r.items || [];
   if (!items.length) { toast('没有可清理的垃圾文件', 'ok'); return; }
-  openListModal('清理垃圾：勾选要删除的项目', items.map(function (i) {
-    return { label: i.label, sub: fmtSize(i.size), value: i.path, checked: true };
+  const total = fmtSize(r.totalSize || 0);
+  const groups = {};
+  items.forEach(function (i) { (groups[i.group] = groups[i.group] || []).push(i); });
+  openListModal('清理垃圾 · 共 ' + items.length + ' 项 / ' + total, items.map(function (i) {
+    return {
+      label: '[' + i.group + '] ' + i.label,
+      sub: (i.isDir ? '目录 ' : '') + fmtSize(i.size),
+      note: i.purpose || '',
+      value: i.path,
+      checked: true,
+    };
   }), '删除选中', async function (chosen) {
     if (!chosen.length) { toast('没有选中任何项目', 'ok'); return; }
     const res = await tryCall('do_cleanup', { paths: chosen });
