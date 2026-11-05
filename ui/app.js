@@ -77,6 +77,19 @@ function renderState() {
   $('subtitle').textContent = (s.seewoDir ? '已找到希沃目录' : '未找到希沃目录') +
     (s.injected ? ' · 已注入' : ' · 未注入');
 
+  // 已经是最新注入 -> 按钮不再叫「升级注入」，避免误导
+  const btnPatch = $('btnPatch');
+  if (s.injected && s.installedVersion === s.version) {
+    btnPatch.textContent = '重新注入';
+    btnPatch.className = 'btn ghost';
+  } else if (s.injected) {
+    btnPatch.textContent = '升级注入 ' + (s.installedVersion || '?') + ' → ' + s.version;
+    btnPatch.className = 'btn primary';
+  } else {
+    btnPatch.textContent = '安装 / 注入';
+    btnPatch.className = 'btn primary';
+  }
+
   const vb = $('versionBadge');
   if (s.injected && s.installedVersion) {
     const same = s.installedVersion === s.version;

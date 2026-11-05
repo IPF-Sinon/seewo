@@ -23,7 +23,7 @@ const SINGLE_INSTANCE_PORT: u16 = 37651;
 const MARKER: &str = "aura-screensaver-loader";
 const INJECT_ANCHOR: &str = "n.p=\"\",n(n.s=140)}([";
 const INJECT_REPLACE: &str = "n.p=\"\",global.__AURA_REQ__=n,n(n.s=140)}([";
-const CONFIG_VERSION: &str = "3.0.0";
+const CONFIG_VERSION: &str = "3.1.0";
 
 // ===================== asar =====================
 
@@ -1507,10 +1507,23 @@ fn open_safe_dir() -> Result<(), String> {
 
 // ===================== 小工具 =====================
 
+/// 在 Windows 上让子进程不弹控制台窗口。
+/// 用户反馈「一打开软件总闪过几个命令行窗口」——
+/// 原因就是 whoami / bcdedit / tasklist 这些命令各自弹了个控制台。
+fn no_window(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
 fn run_cmd(program: &str, args: &[&str]) -> Result<String, String> {
-    let out = Command::new(program)
-        .args(args)
-        .output()
+    let mut c = Command::new(program);
+    c.args(args);
+    no_window(&mut c);
+    let out = c.output()
         .map_err(|e| e.to_string())?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
@@ -1523,7 +1536,10 @@ fn is_admin() -> bool {
     // 用令牌完整性级别判断（High=S-1-16-12288 / System=S-1-16-16384）。
     // 原来的 net session 依赖 Server 服务，而安全模式下该服务不启动，
     // 会把管理员误判成「不是管理员」。
-    match Command::new("whoami.exe").arg("/groups").output() {
+    let mut c = Command::new("whoami.exe");
+    c.arg("/groups");
+    no_window(&mut c);
+    match c.output() {
         Ok(o) => {
             let t = String::from_utf8_lossy(&o.stdout);
             t.contains("S-1-16-12288") || t.contains("S-1-16-16384")
@@ -1533,7 +1549,10 @@ fn is_admin() -> bool {
 }
 
 fn is_safe_mode() -> bool {
-    let out = Command::new("bcdedit.exe").arg("/enum").arg("{current}").output();
+    let mut c = Command::new("bcdedit.exe");
+    c.arg("/enum").arg("{current}");
+    no_window(&mut c);
+    let out = c.output();
     match out {
         Ok(o) => String::from_utf8_lossy(&o.stdout).to_lowercase().contains("safeboot"),
         Err(_) => false,
@@ -1547,7 +1566,9 @@ fn seewo_process_counts() -> Vec<(String, usize)> {
         "SeewoAbility",
         "ResidentSideBar",
     ];
-    let out = Command::new("tasklist.exe")
+    let mut c = Command::new("tasklist.exe");
+    no_window(&mut c);
+    let out = c
         .arg("/fo")
         .arg("csv")
         .arg("/nh")

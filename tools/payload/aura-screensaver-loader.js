@@ -523,7 +523,11 @@
           // ★ 网页屏保：开了就用网页替代官方图片屏保
           try {
             if (resolveMode(cfg) === 'web' && cfg.web && cfg.web.url) {
-              var wr = cfg.web.useSystemBrowser
+              // ★ 必须按引擎分发。原来只看 useSystemBrowser，
+              //   选「新内核」时它=false，于是错误地走了内置窗口 ——
+              //   这正是「勾了新内核却仍用旧内核、仍报语法不支持」的原因。
+              var __eng = resolveEngine(cfg);
+              var wr = (__eng === 'system' || __eng === 'kernel')
                 ? showWebExternal(cfg.web.url, cfg, log, state)
                 : showWebWindow(cfg.web.url, cfg, log, state);
               if (wr && wr.ok) {
@@ -872,7 +876,10 @@
       var psFile = pathk.join(dir, 'kill-browser.ps1');
 
       // PowerShell 单引号字符串里，单引号本身用两个单引号转义
-      var lit = String(profile).replace(/'/g, "''");
+      // 只匹配目录名（browser-profile-时间戳，本身唯一）。
+      // 拿完整路径 Contains 不可靠：Chrome 可能规范化 --user-data-dir，实测 0 命中。
+      var base = require("path").basename(String(profile)) || String(profile);
+      var lit = base.replace(/'/g, "''");
       var script = [
         '$pat = ' + "'" + lit + "'",
         '$n = 0',
@@ -971,7 +978,7 @@
       w.webContents.insertCSS('#__aura_compat{position:fixed;left:0;right:0;top:0;z-index:2147483647;background:#b3261e;color:#fff;font:14px/1.7 sans-serif;padding:10px 16px;text-align:center;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,.4)}');
       var js = '(function(){try{' +
         'if(document.getElementById("__aura_compat"))return;' +
-        'var d=document.createElement("div");d.id="__aura_compat";' +
+        'var d=document.createElement("div");d.id="__aura_compat";setTimeout(function(){try{var x=document.getElementById("__aura_compat");if(x)x.remove();}catch(e){}},8000);' +
         'd.textContent="此网站的脚本语法不受希沃自带浏览器内核支持，页面可能只显示一部分";' +
         '(document.body||document.documentElement).appendChild(d);' +
         '}catch(e){}})()';
@@ -1341,7 +1348,7 @@
       var kernelExe = kernelDir ? (kernelDir + '\\electron.exe') : null;
       var kernelMain = kernelDir ? (kernelDir + '\\resources\\app\\main.js') : null;
       // 优先用新的三选一 engine；没有就回落到旧的两个布尔标志
-      var engine = (cfg && cfg.web && cfg.web.engine) || '';
+      var engine = resolveEngine(cfg);
       if (engine !== 'kernel' && engine !== 'system' && engine !== 'inner') {
         engine = (cfg && cfg.web && cfg.web.useBundledKernel) ? 'kernel'
                : ((cfg && cfg.web && cfg.web.useSystemBrowser) ? 'system' : 'inner');
@@ -1884,6 +1891,15 @@
     return true;
   }
 
+  /** 解析网页引擎：inner | system | kernel（三选一，兼容旧的两个布尔标志） */
+  function resolveEngine(cfg) {
+    var w = (cfg && cfg.web) || {};
+    var e = w.engine;
+    if (e === 'kernel' || e === 'system' || e === 'inner') return e;
+    if (w.useBundledKernel) return 'kernel';
+    if (w.useSystemBrowser) return 'system';
+    return 'inner';
+  }
   function installControl(controller, share, windowManager, cfg, log, state) {
     var control = {};
 
@@ -1969,7 +1985,8 @@
 
     control.showWeb = function (a) {
       var u = (a && a.url) || (cfg.web && cfg.web.url) || '';
-      if (cfg.web && cfg.web.useSystemBrowser) { return showWebExternal(u, cfg, log, state); }
+      var __e2 = resolveEngine(cfg);
+      if (__e2 === 'system' || __e2 === 'kernel') { return showWebExternal(u, cfg, log, state); }
       return showWebWindow(u, cfg, log, state);
     };
 
