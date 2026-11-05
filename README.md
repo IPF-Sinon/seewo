@@ -22,6 +22,41 @@
 双击 `scripts\安装.bat` 注入，`scripts\配置屏保.bat` 打开图形界面，`scripts\卸载.bat` 还原。
 同样**不需要 Node.js** —— 注入器已用纯 PowerShell 重写。
 
+---
+
+## 两种版本
+
+| 版本 | 产物 | 说明 |
+|---|---|---|
+| **Tauri 版**（推荐） | `AuraScreensaver-Tauri-新版` | Rust + WebView2，约 1.4 MB，界面现代：图片/文件夹多选、大图预览、下载进度条 |
+| PowerShell 版（旧） | `AuraScreensaver-Legacy-旧版PowerShell` | 单文件 PS2EXE，胜在**能在安全模式里跑 GUI** |
+
+> ⚠️ **Tauri 版依赖 WebView2，而安全模式下 WebView2 起不来。**
+> 所以安装/卸载请用桌面自动生成的 `安全模式-点我.bat` —— 它调用 exe 的
+> **命令行模式**（纯 Rust 文件操作，不需要界面、不需要 PowerShell）：
+
+```
+aura-screensaver.exe --safe-install     注入
+aura-screensaver.exe --safe-uninstall   还原
+aura-screensaver.exe --exit-safe-mode   只退出安全模式
+```
+
+完整流程：点「安装 / 升级注入」→ 自动重启进安全模式（桌面生成 `安全模式-点我.bat`）
+→ 在安全模式里**双击它、菜单选 1** → 自动完成并重启回正常模式。
+
+> 万一卡在安全模式：批处理里选 3，或手动执行 `bcdedit /deletevalue {current} safeboot` 后重启。
+
+### Tauri 版的四种屏保模式
+
+- **禁用屏保** —— 直接拦截 `/displayScreenSaver`，屏保不再出现
+- **自定义图集** —— 用自己的图片替换集控下发的图（支持选文件夹、递归扫描、去重、大图预览）
+- **网页 / 视频** —— 网页或本地 mp4/webm 视频当屏保；引擎可选
+  内置内核 / 系统浏览器（Edge·Chrome）/ 下载的新内核
+- **不修改图片** —— 只调整显示参数，最安全
+
+网页屏保用系统浏览器时会有一个**置顶悬浮「退出屏保」按钮**浮在 kiosk 之上，
+关闭按「进程句柄 → PID 文件 → profile 查找」三层兜底。
+
 ## 你需要哪些文件
 
 最小可用集合（脚本方式）：
@@ -217,7 +252,7 @@ docs/注入验证记录.md          注入复验记录（含方案缺陷修正�
 ## 已验证状态
 
 ```
-node --test 'test/**/*.test.js'   →   41 passed / 0 failed
+node --test 'test/**/*.test.js'   →   101 passed / 0 failed
 ```
 
 其中「真实 bundle 验证」用例直接读取解包后的 `main.js`，断言模块定位结果：
@@ -245,6 +280,8 @@ node --test 'test/**/*.test.js'   →   41 passed / 0 failed
 
 ## 许可证
 
-本参考实现为独立编写，建议以 MIT 发布。
-**但请注意**：若你选择复制 [HugoAura-Enhanced](https://github.com/blingbling-bow/HugoAura-Enhanced) 的任何代码，
+本项目以 [MIT](LICENSE) 许可发布。
+
+本实现为独立编写，**未复制** [HugoAura-Enhanced](https://github.com/blingbling-bow/HugoAura-Enhanced) 的任何代码，
+仅参考了「注入而非重打包」的架构思路。若你选择复制该项目的代码，
 则因其为 **GPL-3.0**，你的衍生作品必须以 **GPL-3.0** 开源并保留原始版权声明。

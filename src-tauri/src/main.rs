@@ -17,14 +17,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const LOADER_JS: &str = include_str!("../../tools/payload/aura-screensaver-loader.js");
-const KERNEL_PS1: &str = include_str!("kernel_download.ps1");
 const KERNEL_MAIN_JS: &str = include_str!("../../tools/electron-app/main.js");
 const KERNEL_PKG_JSON: &str = include_str!("../../tools/electron-app/package.json");
 const SINGLE_INSTANCE_PORT: u16 = 37651;
 const MARKER: &str = "aura-screensaver-loader";
 const INJECT_ANCHOR: &str = "n.p=\"\",n(n.s=140)}([";
 const INJECT_REPLACE: &str = "n.p=\"\",global.__AURA_REQ__=n,n(n.s=140)}([";
-const CONFIG_VERSION: &str = "2.7.0";
+const CONFIG_VERSION: &str = "2.8.0";
 
 // ===================== asar =====================
 
@@ -935,7 +934,13 @@ fn dir_size(p: &Path) -> u64 {
     n
 }
 
-/// 后台下载新内核，通过 kernel-progress / kernel-done 事件回报进度
+/// 下载新内核 —— **纯 Rust 实现**，不调用 PowerShell。
+///
+/// 之前是写个 .ps1 让 PowerShell 下载 + Expand-Archive，问题：
+///   1) 多一个进程和一层错误传递，失败时只知道「所有源都失败了」；
+///   2) 进度要从文件大小反推，不精确；
+///   3) PowerShell 在受限环境可能被拦。
+/// 现在用 ureq 流式下载（边下边发进度事件），zip 直接解压。
 #[tauri::command]
 fn download_kernel(app: tauri::AppHandle) -> Result<Value, String> {
     static RUNNING: AtomicBool = AtomicBool::new(false);
@@ -944,59 +949,156 @@ fn download_kernel(app: tauri::AppHandle) -> Result<Value, String> {
     }
     let dir = match write_kernel_app() {
         Ok(d) => d,
-        Err(e) => { RUNNING.store(false, Ordering::SeqCst); return Err(e); }
+        Err(e) => {
+            RUNNING.store(false, Ordering::SeqCst);
+            return Err(e);
+        }
     };
-    let script = dir.join("_download.ps1");
-    fs::write(&script, KERNEL_PS1).map_err(|e| format!("写下载脚本失败: {}", e))?;
-    let dir_s = dir.to_string_lossy().to_string();
-
     let app2 = app.clone();
-    let dir2 = dir.clone();
     std::thread::spawn(move || {
-        let spawned = Command::new("powershell.exe")
-            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
-            .arg(&script)
-            .arg(&dir_s)
-            .spawn();
-        let mut child = match spawned {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = app2.emit("kernel-done", json!({ "ok": false, "message": format!("启动下载失败: {}", e) }));
-                RUNNING.store(false, Ordering::SeqCst);
-                return;
+        let r = do_download_kernel(&dir, &app2);
+        RUNNING.store(false, Ordering::SeqCst);
+        match r {
+            Ok(ver) => {
+                let _ = app2.emit(
+                    "kernel-done",
+                    json!({ "ok": true, "message": format!("内核 v{} 已就绪", ver), "version": ver }),
+                );
             }
-        };
-        loop {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            let total = fs::read_to_string(dir2.join("download.total"))
-                .ok()
-                .and_then(|s| s.trim().parse::<u64>().ok())
-                .unwrap_or(0);
-            let cur = fs::metadata(dir2.join("download.zip")).map(|m| m.len()).unwrap_or(0);
-            let _ = app2.emit("kernel-progress", json!({ "downloaded": cur, "total": total }));
-            match child.try_wait() {
-                Ok(Some(st)) => {
-                    let ver = fs::read_to_string(dir2.join("version.txt")).unwrap_or_default().trim().to_string();
-                    let ok = st.success() && dir2.join("electron.exe").exists();
-                    let message = if ok {
-                        format!("内核 v{} 已就绪", ver)
-                    } else {
-                        "下载失败：所有源都没成功，请检查网络后重试".to_string()
-                    };
-                    let _ = app2.emit("kernel-done", json!({ "ok": ok, "message": message, "version": ver }));
-                    RUNNING.store(false, Ordering::SeqCst);
-                    return;
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    let _ = app2.emit("kernel-done", json!({ "ok": false, "message": format!("{}", e) }));
-                    RUNNING.store(false, Ordering::SeqCst);
-                    return;
-                }
+            Err(e) => {
+                let _ = app2.emit("kernel-done", json!({ "ok": false, "message": e }));
             }
         }
     });
     Ok(json!({ "started": true, "message": "已开始下载（约 151MB，后台进行）" }))
+}
+
+fn mirror_urls(url: &str) -> Vec<String> {
+    vec![
+        url.to_string(),
+        format!("https://gh-proxy.com/{}", url),
+        format!("https://gh-proxy.org/{}", url),
+    ]
+}
+
+fn do_download_kernel(dir: &Path, app: &tauri::AppHandle) -> Result<String, String> {
+    // 1) 取最新版本号（三级回退）
+    let api = "https://api.github.com/repos/electron/electron/releases/latest";
+    let mut version = String::from("45.1.0");
+    for u in mirror_urls(api) {
+        let resp = ureq::get(&u)
+            .set("User-Agent", "AuraScreensaver")
+            .timeout(std::time::Duration::from_secs(20))
+            .call();
+        if let Ok(r) = resp {
+            if let Ok(v) = r.into_json::<serde_json::Value>() {
+                if let Some(t) = v.get("tag_name").and_then(|x| x.as_str()) {
+                    version = t.trim_start_matches('v').to_string();
+                    break;
+                }
+            }
+        }
+    }
+    log_line("INFO", &format!("内核目标版本 v{}", version));
+
+    let name = format!("electron-v{}-win32-x64.zip", version);
+    let direct = format!(
+        "https://github.com/electron/electron/releases/download/v{}/{}",
+        version, name
+    );
+
+    let zip_path = dir.join("download.zip");
+    let _ = fs::remove_file(&zip_path);
+
+    let mut last_err = String::new();
+    let mut ok = false;
+    for u in mirror_urls(&direct) {
+        log_line("INFO", &format!("尝试下载源 {}", u));
+        match fetch_to_file(&u, &zip_path, app) {
+            Ok(_) => {
+                ok = true;
+                break;
+            }
+            Err(e) => {
+                last_err = e;
+                let _ = fs::remove_file(&zip_path);
+            }
+        }
+    }
+    if !ok {
+        return Err(format!("所有下载源都失败：{}", last_err));
+    }
+
+    let len = fs::metadata(&zip_path).map(|m| m.len()).unwrap_or(0);
+    if len < 50 * 1024 * 1024 {
+        let _ = fs::remove_file(&zip_path);
+        return Err(format!(
+            "下载文件过小（{:.1} MB），可能是失败页",
+            len as f64 / 1048576.0
+        ));
+    }
+
+    // 2) 解压
+    let f = fs::File::open(&zip_path).map_err(|e| format!("打开压缩包失败: {}", e))?;
+    let mut ar = zip::ZipArchive::new(std::io::BufReader::new(f))
+        .map_err(|e| format!("解析压缩包失败: {}", e))?;
+    let total = ar.len();
+    for i in 0..total {
+        let mut entry = match ar.by_index(i) {
+            Ok(x) => x,
+            Err(e) => return Err(format!("读取压缩项失败: {}", e)),
+        };
+        let out = match entry.enclosed_name() {
+            Some(p) => dir.join(p),
+            None => continue, // 防目录穿越
+        };
+        if entry.is_dir() {
+            let _ = fs::create_dir_all(&out);
+            continue;
+        }
+        if let Some(par) = out.parent() {
+            let _ = fs::create_dir_all(par);
+        }
+        let mut w = fs::File::create(&out)
+            .map_err(|e| format!("写入失败 {}: {}", out.display(), e))?;
+        std::io::copy(&mut entry, &mut w).map_err(|e| format!("解压失败: {}", e))?;
+    }
+    let _ = fs::remove_file(&zip_path);
+    let _ = fs::write(dir.join("version.txt"), &version);
+    log_line("INFO", &format!("内核 v{} 解压完成（{} 项）", version, total));
+    Ok(version)
+}
+
+/// 流式下载到文件，边下边发进度事件
+fn fetch_to_file(url: &str, dest: &Path, app: &tauri::AppHandle) -> Result<(), String> {
+    let resp = ureq::get(url)
+        .set("User-Agent", "AuraScreensaver")
+        .timeout(std::time::Duration::from_secs(3600))
+        .call()
+        .map_err(|e| format!("请求失败: {}", e))?;
+    let total: u64 = resp
+        .header("Content-Length")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let mut reader = resp.into_reader();
+    let mut file = fs::File::create(dest).map_err(|e| format!("创建文件失败: {}", e))?;
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut done: u64 = 0;
+    let mut last_emit: u64 = 0;
+    loop {
+        let n = std::io::Read::read(&mut reader, &mut buf).map_err(|e| format!("读取失败: {}", e))?;
+        if n == 0 {
+            break;
+        }
+        std::io::Write::write_all(&mut file, &buf[..n]).map_err(|e| format!("写入失败: {}", e))?;
+        done += n as u64;
+        if done - last_emit >= 512 * 1024 {
+            last_emit = done;
+            let _ = app.emit("kernel-progress", json!({ "downloaded": done, "total": total }));
+        }
+    }
+    let _ = app.emit("kernel-progress", json!({ "downloaded": done, "total": total }));
+    Ok(())
 }
 
 // ===================== 升级检测 / 清理 =====================
@@ -1039,7 +1141,7 @@ fn cleanup_candidates() -> Result<Value, String> {
         }
     }
     let kd = kernel_dir();
-    for n in ["download.zip", "download.total", "download.version", "_download.ps1"] {
+    for n in ["download.zip"] {
         let p = kd.join(n);
         if p.exists() {
             let sz = fs::metadata(&p).map(|m| m.len()).unwrap_or(0);

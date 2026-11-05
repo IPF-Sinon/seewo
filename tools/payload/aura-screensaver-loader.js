@@ -792,6 +792,30 @@
     } catch (e) { log.debug('注入退出按钮失败: ' + (e && e.message || e)); }
   }
 
+  /**
+   * 第三层兜底：按 profile 路径查找并杀掉浏览器进程。
+   * 用在「进程句柄没了、PID 也失效」的情况 ——
+   * 典型场景：复用同一 profile 时，新起的 chrome.exe 只给已存在的实例发了
+   * 个信号就自己退出，我们手里那个句柄指向的其实是个早已结束的启动器进程。
+   */
+  function killBrowserByProfile(profile, log) {
+    if (!profile) return false;
+    try {
+      var cp = require('child_process');
+      var safe = String(profile).replace(/\\/g, '\\\\');
+      var ps = 'Get-CimInstance Win32_Process | Where-Object { ' +
+        '($_.Name -eq \'chrome.exe\' -or $_.Name -eq \'msedge.exe\') -and ' +
+        '$_.CommandLine -and $_.CommandLine.Contains(\'' + safe + '\') } | ' +
+        'ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }';
+      cp.spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], { stdio: 'ignore' });
+      log.warn('已按 profile 兜底清理浏览器进程: ' + profile);
+      return true;
+    } catch (e) {
+      log.warn('按 profile 兜底清理失败: ' + (e && e.message || e));
+      return false;
+    }
+  }
+
   function closeWebWindow(state, log) {
     try {
       // 先解绑全局快捷键，避免屏保关掉后 ESC 还被我们占着
@@ -823,8 +847,11 @@
               require('child_process').spawn('taskkill.exe', ['/PID', pid2, '/T', '/F'], { stdio: 'ignore' });
             }
             try { fsv2.unlinkSync(pf2); } catch (e2) { }
+            killBrowserByProfile(state && state.webProfile, log);
           } else {
-            log.warn('关闭网页屏保：既没有进程句柄也没有 PID 文件，无法关闭外部浏览器');
+            if (!killBrowserByProfile(state && state.webProfile, log)) {
+              log.warn('关闭网页屏保：句柄 / PID / profile 三种方式都没能关闭外部浏览器');
+            }
           }
         } catch (e3) { }
       }
@@ -1257,7 +1284,13 @@
           '--disable-features=Translate'
         ];
       } else {
-        profile = resolveDataFile(['seewo', 'AuraScreensaver', 'browser-profile']);
+        // ★ 每次用**独立且唯一**的 profile。两个原因：
+        //   1) 不污染用户自己的浏览记录/登录态；
+        //   2) 关键 —— 若复用同一个 profile，而上一轮遗留的 Chrome 还在跑，
+        //      新起的 chrome.exe 只会给那个已存在的实例发个信号就**自己退出**，
+        //      于是 state.webProc 立刻变 null，退出按钮再也杀不掉它。
+        //      （用户日志：既没有进程句柄也没有 PID 文件，就是这个。）
+        profile = resolveDataFile(['seewo', 'AuraScreensaver', 'browser-profile-' + Date.now()]);
         try { fs2.mkdirSync(profile, { recursive: true }); } catch (e) { }
         args = [
           '--user-data-dir=' + profile,
@@ -1269,8 +1302,12 @@
           target
         ];
       }
+      state.webProfile = profile;
       var child = cp.spawn(exe, args, { detached: false, stdio: 'ignore' });
       state.webProc = child;
+      // ★ 记下 PID：即使进程句柄丢了（被系统回收、或启动器进程提前退出），
+      //   也能按 PID 把整棵进程树杀掉。之前这一行没有，所以退出按钮点了也关不掉。
+      try { fs2.writeFileSync(pidFile, String(child.pid), 'utf8'); } catch (e) { }
 
       // ★ spawn 失败是异步的（error 事件），不会同步抛异常。
       //   不挂这个处理器的话，进程压根没起来也照样报「打开成功」，
