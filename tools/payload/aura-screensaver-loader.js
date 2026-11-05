@@ -129,6 +129,7 @@
   var DEFAULT_CONFIG = {
     // 用户明确要求：关闭屏保 —— false 时吞掉 /displayScreenSaver
     screensaverEnabled: false,
+    idleMinutes: 0,
     // 是否允许「关闭屏保窗口 → 级联进入屏幕锁」。官方 module 69 的 close 回调
     // 调用了自己不存在的 startLock()（确定性缺陷），但若官方修好会变成「关掉即锁屏」，
     // 故这里默认切断级联。
@@ -193,6 +194,8 @@
     var cfg = merge(DEFAULT_CONFIG, effective);
     // 防御：类型不对就回落到默认，绝不因为脏配置改变行为
     if (typeof cfg.screensaverEnabled !== 'boolean') cfg.screensaverEnabled = DEFAULT_CONFIG.screensaverEnabled;
+    var __im = Number(cfg.idleMinutes);
+    cfg.idleMinutes = (isFinite(__im) && __im > 0) ? __im : 0;
     if (typeof cfg.lockCascadeOnClose !== 'boolean') cfg.lockCascadeOnClose = DEFAULT_CONFIG.lockCascadeOnClose;
     // merge 是浅合并：文件里给了 web 就会整体覆盖默认值，这里补齐缺的字段
     // mode 不在默认配置里 —— 缺省时由 resolveMode 按 web.enabled / override 推断，
@@ -205,6 +208,7 @@
       if (typeof cfg.web.enabled !== 'boolean') cfg.web.enabled = false;
       if (typeof cfg.web.url !== 'string') cfg.web.url = '';
       if (typeof cfg.web.closeOnClick !== 'boolean') cfg.web.closeOnClick = false;
+    if (cfg.override && typeof cfg.override === 'object' && typeof cfg.override.shuffle !== 'boolean') cfg.override.shuffle = false;
       if (typeof cfg.web.useSystemBrowser !== 'boolean') cfg.web.useSystemBrowser = false;
       if (typeof cfg.web.useBundledKernel !== 'boolean') cfg.web.useBundledKernel = false;
     }
@@ -439,6 +443,13 @@
       } else { log.warn('textList 非法（必须是数组），已忽略'); out.textList = data.textList; }
     }
 
+    // ★ 随机模式：每次应用 override 都重新打乱一次顺序。
+    //   每次进入屏保都会经过这里，所以「启动前自动打乱」天然成立。
+    if (override.shuffle === true && Array.isArray(out.imageList) && out.imageList.length > 1) {
+      shuffleInPlace(out.imageList);
+      log.info('随机模式：已打乱图片顺序（' + out.imageList.length + ' 张）');
+    }
+
     // 统一把本地路径转成目标形式（file:/// 或原样）。
     // 对已经是 URL 的值恒等，故幂等。
     if (Array.isArray(out.imageList)) {
@@ -452,6 +463,15 @@
    * 归一化转场数组：长度必须等于 imageList.length，值域 0..6。
    * 不符就重新生成 —— 否则渲染器轮播索引会错位（契约硬要求）。
    */
+  /** 原地洗牌（Fisher-Yates） */
+  function shuffleInPlace(arr) {
+    if (!Array.isArray(arr) || arr.length < 2) return arr;
+    for (var i = arr.length - 1; i > 0; i--) {
+      var j = Math.floor(Math.random() * (i + 1));
+      var t = arr[i]; arr[i] = arr[j]; arr[j] = t;
+    }
+    return arr;
+  }
   function normalizeTransitionList(list, count) {
     if (!Array.isArray(list) || list.length !== count) return generateTransitionList(count);
     for (var i = 0; i < list.length; i++) {
@@ -491,6 +511,15 @@
             log.info('已拦截 ' + SCREENSAVER_ROUTE + '（屏保已按配置关闭）');
             return;
           }
+          // ★ 自定义无操作超时：idleMinutes>0 时官方那套计时我们不要，
+          //   由 installIdleTimer 自己驱动（否则两边会各触发一次）。
+          var __cidle = Number(cfg.idleMinutes);
+          if (isFinite(__cidle) && __cidle > 0 && !state.idleSelfTrigger) {
+            state.blocked++;
+            log.info('已按自定义无操作超时拦截官方屏保触发（自定义 ' + __cidle + ' 分钟）');
+            return;
+          }
+
           // ★ 网页屏保：开了就用网页替代官方图片屏保
           try {
             if (resolveMode(cfg) === 'web' && cfg.web && cfg.web.url) {
@@ -544,7 +573,33 @@
               share.share(CHANNEL_TRANSITION, tlist);
             }
           } catch (e) { log.warn('预广播转场数组失败（官方逻辑仍会广播）: ' + (e.message || e)); }
-          return original.call(this, forwarded);
+          var __ret = original.call(this, forwarded);
+          // ★ 随机模式：间隔数量*间隔 + 1 秒后再打乱一次
+          try {
+            var __sh = cfg.override && cfg.override.shuffle === true;
+            if (__sh) {
+              if (state.shuffleTimer) { clearTimeout(state.shuffleTimer); state.shuffleTimer = null; }
+              var __imgs = (forwarded.data && forwarded.data.imageList) || [];
+              var __n = __imgs.length;
+              var __iv = Number((cfg.override && cfg.override.switchInterval) || (forwarded.data && forwarded.data.switchInterval)) || 5;
+              if (__n > 1) {
+                var __delay = __n * __iv + 1;
+                state.shuffleTimer = setTimeout(function () {
+                  try {
+                    var p2 = JSON.parse(JSON.stringify(forwarded.data));
+                    if (Array.isArray(p2.imageList)) { shuffleInPlace(p2.imageList); }
+                    if (Array.isArray(p2.transitionList)) { shuffleInPlace(p2.transitionList); }
+                    controller.onMessage({ url: SCREENSAVER_ROUTE, data: p2 });
+                    log.info('随机模式：已按计划重新打乱（' + __n + ' 张，间隔 ' + __iv + 's，等待 ' + __delay + 's）');
+                  } catch (e) { log.warn('随机模式重新打乱失败: ' + (e && e.message || e)); }
+                }, __delay * 1000);
+                log.info('随机模式：' + __delay + ' 秒后会再打乱一次');
+              }
+            } else if (state.shuffleTimer) {
+              clearTimeout(state.shuffleTimer); state.shuffleTimer = null;
+            }
+          } catch (e) { }
+          return __ret;
         }
       } catch (e) {
         // 任何异常都放行官方逻辑，绝不阻断
@@ -1764,6 +1819,71 @@
    *   reloadConfig() 重读 config.json（免重启试配置）
    *   getState()     状态快照
    */
+  /* ------------------------------------------------------------------ *
+   * 自定义「无操作超时」
+   *
+   * 官方是希沃主进程自己计时，配置里改不了。但 Electron 提供了
+   * powerMonitor.getSystemIdleTime()（Windows 下就是系统级空闲秒数），
+   * 所以可以自己接管：
+   *   · idleMinutes > 0 时，hook 会**吞掉官方的屏保触发**
+   *   · 我们每 3 秒查一次空闲时间，达到阈值就自己把屏保显示出来
+   *   · 空闲归零（用户回来了）就关掉屏保
+   * 这样既不用去逆向官方的计时器，也不会和官方触发打架。
+   * ------------------------------------------------------------------ */
+  function installIdleTimer(control, controller, cfg, log, state) {
+    function clearTimer() {
+      if (state.idleTimer) {
+        try { clearInterval(state.idleTimer); } catch (e) { }
+        state.idleTimer = null;
+      }
+      state.idleShowing = false;
+    }
+
+    var minutes = Number(cfg && cfg.idleMinutes);
+    if (!isFinite(minutes) || minutes <= 0) {
+      clearTimer();
+      return false;
+    }
+
+    var el = getElectronModule();
+    var pm = el && el.powerMonitor;
+    if (!pm || typeof pm.getSystemIdleTime !== 'function') {
+      log.warn('自定义无操作超时：拿不到 powerMonitor，已跳过（改用官方行为）');
+      return false;
+    }
+
+    clearTimer();
+    var threshold = Math.round(minutes * 60);
+    log.info('已启用自定义无操作超时：' + minutes + ' 分钟（' + threshold + ' 秒）');
+
+    state.idleTimer = setInterval(function () {
+      try {
+        var idle = Number(pm.getSystemIdleTime()) || 0;
+        if (!state.idleShowing && idle >= threshold) {
+          state.idleShowing = true;
+          state.idleSelfTrigger = true;
+          try {
+            var r = control.preview({});
+            log.info('自定义无操作超时触发屏保（已空闲 ' + idle + ' 秒，阈值 ' + threshold + ' 秒）'
+              + ((r && r.ok) ? '' : '：触发失败 ' + ((r && r.message) || '')));
+          } finally {
+            state.idleSelfTrigger = false;
+          }
+        } else if (state.idleShowing && idle < 3) {
+          state.idleShowing = false;
+          try {
+            if (controller && typeof controller.stopScreensaver === 'function') {
+              controller.stopScreensaver();
+            }
+          } catch (e) { }
+          log.info('检测到用户回来（空闲 ' + idle + ' 秒），已关闭屏保');
+        }
+      } catch (e) { }
+    }, 3000);
+    try { if (state.idleTimer && typeof state.idleTimer.unref === 'function') state.idleTimer.unref(); } catch (e) { }
+    return true;
+  }
+
   function installControl(controller, share, windowManager, cfg, log, state) {
     var control = {};
 
@@ -1876,6 +1996,7 @@
         for (k in cfg) if (Object.prototype.hasOwnProperty.call(cfg, k)) delete cfg[k];
         for (k in fresh) if (Object.prototype.hasOwnProperty.call(fresh, k)) cfg[k] = fresh[k];
         log.info('配置已重载: screensaverEnabled=' + cfg.screensaverEnabled);
+        try { installIdleTimer(control, controller, cfg, log, state); } catch (e) { }
         return { ok: true, config: cfg };
       } catch (e) {
         return { ok: false, reason: 'exception', message: String(e && e.message || e) };
@@ -1892,6 +2013,7 @@
       };
     };
 
+    try { installIdleTimer(control, controller, cfg, log, state); } catch (e) { }
     return control;
   }
 

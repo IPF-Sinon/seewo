@@ -57,6 +57,7 @@
           <button id="btnPickImages" class="btn ghost tiny">添加图片…</button>
           <button id="btnPickFolder" class="btn ghost tiny">添加文件夹…</button>
           <button id="btnPreviewImages" class="btn ghost tiny">预览图片</button>
+          <label class="check"><input id="chkShuffle" type="checkbox" /><span>随机顺序</span></label>
         </div>
         <label class="field"><span>文案 · 每行一条（可留空）</span>
           <textarea id="txtTexts" rows="2"></textarea></label>
@@ -78,7 +79,7 @@
           </div>
           <span id="browserStatus" class="badge tiny">浏览器：检测中…</span>
           <span id="kernelStatus" class="badge tiny">新内核：检查中…</span>
-          <button id="btnKernel" class="btn ghost tiny">下载新内核…</button>
+          <button id="btnKernel" class="btn ghost tiny">测速选源并下载…</button>
         </div>
         <div id="kernelBarWrap" class="bar-wrap hidden"><div id="kernelBar" class="bar"></div></div>
         <label class="field"><span>浏览器路径（留空自动查找）</span>
@@ -113,6 +114,12 @@
       <label class="field"><span>转场 · 每张一个 0–6，逗号分隔；留空随机</span>
         <input id="txtTrans" type="text" placeholder="例如 0,3,5" /></label>
       <label class="check" style="margin-top:8px"><input id="chkLock" type="checkbox" /><span>关闭屏保后自动锁屏（希沃官方行为）</span></label>
+      <div class="row tight">
+        <label class="check"><input id="chkIdle" type="checkbox" /><span>自定义无操作超时：</span></label>
+        <input id="numIdle" type="number" min="1" max="600" value="10" style="width:78px" />
+        <span class="hint" style="margin:0">分钟后启动屏保</span>
+      </div>
+      <p class="hint">不勾选时用希沃官方的时间。勾选后由本程序接管（官方触发会被拦截），检测到你有操作就自动关闭屏保。</p>
     </section>
 
     <section class="card">

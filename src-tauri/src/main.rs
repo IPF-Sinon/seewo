@@ -23,7 +23,7 @@ const SINGLE_INSTANCE_PORT: u16 = 37651;
 const MARKER: &str = "aura-screensaver-loader";
 const INJECT_ANCHOR: &str = "n.p=\"\",n(n.s=140)}([";
 const INJECT_REPLACE: &str = "n.p=\"\",global.__AURA_REQ__=n,n(n.s=140)}([";
-const CONFIG_VERSION: &str = "2.9.0";
+const CONFIG_VERSION: &str = "3.0.0";
 
 // ===================== asar =====================
 
@@ -941,8 +941,97 @@ fn dir_size(p: &Path) -> u64 {
 ///   2) 进度要从文件大小反推，不精确；
 ///   3) PowerShell 在受限环境可能被拦。
 /// 现在用 ureq 流式下载（边下边发进度事件），zip 直接解压。
+/// 对三个下载源做一次小范围测速（各拉 256KB），返回按速度排序的结果。
+/// 让用户在下载 150MB 之前就知道该选哪个源。
 #[tauri::command]
-fn download_kernel(app: tauri::AppHandle) -> Result<Value, String> {
+fn speedtest_mirrors(version: Option<String>) -> Result<Value, String> {
+    let ver = match version {
+        Some(v) if !v.is_empty() => v,
+        _ => resolve_kernel_version(),
+    };
+    let name = format!("electron-v{}-win32-x64.zip", ver);
+    let direct = format!(
+        "https://github.com/electron/electron/releases/download/v{}/{}",
+        ver, name
+    );
+    let mirrors: Vec<(&str, String)> = vec![
+        ("直连 GitHub", direct.clone()),
+        ("gh-proxy.com", format!("https://gh-proxy.com/{}", direct)),
+        ("gh-proxy.org", format!("https://gh-proxy.org/{}", direct)),
+    ];
+
+    const PROBE: u64 = 256 * 1024;
+    let mut results: Vec<Value> = Vec::new();
+    for (label, url) in mirrors {
+        let t0 = std::time::Instant::now();
+        let mut bytes: u64 = 0;
+        let resp = ureq::get(&url)
+            .set("User-Agent", "AuraScreensaver")
+            .set("Range", "bytes=0-262143")
+            .timeout(std::time::Duration::from_secs(12))
+            .call();
+        if let Ok(r) = resp {
+            let mut reader = r.into_reader();
+            let mut buf = vec![0u8; 32 * 1024];
+            while bytes < PROBE {
+                match std::io::Read::read(&mut reader, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => bytes += n as u64,
+                    Err(_) => break,
+                }
+            }
+        }
+        let ms = t0.elapsed().as_millis() as u64;
+        let kbps = if ms > 0 {
+            (bytes as f64 / 1024.0) / (ms as f64 / 1000.0)
+        } else {
+            0.0
+        };
+        results.push(json!({
+            "label": label,
+            "url": url,
+            "ok": bytes > 0,
+            "ms": ms,
+            "bytes": bytes,
+            "kbps": (kbps * 10.0).round() / 10.0,
+        }));
+    }
+    // 可用的排前面，再按速度降序
+    results.sort_by(|a, b| {
+        let ao = a["ok"].as_bool().unwrap_or(false);
+        let bo = b["ok"].as_bool().unwrap_or(false);
+        if ao != bo {
+            return bo.cmp(&ao);
+        }
+        let ak = a["kbps"].as_f64().unwrap_or(0.0);
+        let bk = b["kbps"].as_f64().unwrap_or(0.0);
+        bk.partial_cmp(&ak).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    log_line("INFO", &format!("镜像测速完成，版本 v{}", ver));
+    Ok(json!({ "version": ver, "results": results }))
+}
+
+/// 解析最新 Electron 版本（三级回退）
+fn resolve_kernel_version() -> String {
+    let api = "https://api.github.com/repos/electron/electron/releases/latest";
+    for u in mirror_urls(api) {
+        if let Ok(r) = ureq::get(&u)
+            .set("User-Agent", "AuraScreensaver")
+            .timeout(std::time::Duration::from_secs(15))
+            .call()
+        {
+            if let Ok(v) = r.into_json::<serde_json::Value>() {
+                if let Some(t) = v.get("tag_name").and_then(|x| x.as_str()) {
+                    return t.trim_start_matches('v').to_string();
+                }
+            }
+        }
+    }
+    "45.1.0".to_string()
+}
+
+#[tauri::command]
+fn download_kernel(app: tauri::AppHandle, prefer: Option<String>) -> Result<Value, String> {
     static RUNNING: AtomicBool = AtomicBool::new(false);
     if RUNNING.swap(true, Ordering::SeqCst) {
         return Err("已有下载任务在进行中，请等它结束".to_string());
@@ -955,8 +1044,9 @@ fn download_kernel(app: tauri::AppHandle) -> Result<Value, String> {
         }
     };
     let app2 = app.clone();
+    let pref = prefer.unwrap_or_default();
     std::thread::spawn(move || {
-        let r = do_download_kernel(&dir, &app2);
+        let r = do_download_kernel(&dir, &app2, &pref);
         RUNNING.store(false, Ordering::SeqCst);
         match r {
             Ok(ver) => {
@@ -981,7 +1071,7 @@ fn mirror_urls(url: &str) -> Vec<String> {
     ]
 }
 
-fn do_download_kernel(dir: &Path, app: &tauri::AppHandle) -> Result<String, String> {
+fn do_download_kernel(dir: &Path, app: &tauri::AppHandle, prefer: &str) -> Result<String, String> {
     // 1) 取最新版本号（三级回退）
     let api = "https://api.github.com/repos/electron/electron/releases/latest";
     let mut version = String::from("45.1.0");
@@ -1010,9 +1100,13 @@ fn do_download_kernel(dir: &Path, app: &tauri::AppHandle) -> Result<String, Stri
     let zip_path = dir.join("download.zip");
     let _ = fs::remove_file(&zip_path);
 
+    let mut urls = mirror_urls(&direct);
+    if !prefer.is_empty() {
+        urls.sort_by_key(|u| if u == prefer { 0 } else { 1 });
+    }
     let mut last_err = String::new();
     let mut ok = false;
-    for u in mirror_urls(&direct) {
+    for u in urls {
         log_line("INFO", &format!("尝试下载源 {}", u));
         match fetch_to_file(&u, &zip_path, app) {
             Ok(_) => {
@@ -1631,6 +1725,7 @@ fn main() {
             run_pending_safe_action,
             kernel_info,
             download_kernel,
+            speedtest_mirrors,
             check_upgrade,
             cleanup_candidates,
             do_cleanup,

@@ -118,6 +118,10 @@ function renderState() {
   if (er) er.checked = true;
   $('txtBrowserPath').value = web.browserPath || '';
   $('chkLock').checked = cfg.lockCascadeOnClose === true;
+  const idleMin = Number(cfg.idleMinutes) || 0;
+  $('chkIdle').checked = idleMin > 0;
+  $('numIdle').value = idleMin > 0 ? idleMin : 10;
+  $('numIdle').disabled = !$('chkIdle').checked;
 
   // 计算实际模式（配置里 mode 只存 image/web/none；禁用靠 screensaverEnabled=false）
   let m = cfg.mode;
@@ -138,6 +142,7 @@ function renderState() {
   const fr = document.querySelector('input[name=fit][value="' + (ov.pictureSizeType === 1 ? '1' : '0') + '"]');
   if (fr) fr.checked = true;
   $('txtTrans').value = (ov.transitionList || ov.screensaverTransitionList || []).join(',');
+  $('chkShuffle').checked = ov.shuffle === true;
 
   applyModeUI();
   document.querySelectorAll('button').forEach(function (b) { if (b.id) b.disabled = false; });
@@ -167,6 +172,7 @@ function collectConfig() {
   }
   base.web = web;
   base.lockCascadeOnClose = $('chkLock').checked;
+  base.idleMinutes = $('chkIdle').checked ? Math.max(1, parseInt($('numIdle').value, 10) || 10) : 0;
 
   const imgs = $('txtImages').value.split('\n').map(function (x) { return x.trim(); }).filter(Boolean);
   const texts = $('txtTexts').value.split('\n').map(function (x) { return x.trim(); }).filter(Boolean);
@@ -189,7 +195,8 @@ function collectConfig() {
     textList: texts.map(function (t) { return { content: t }; }),
     switchInterval: Math.max(1, parseInt($('numInterval').value, 10) || 5),
     pictureSizeType: ((document.querySelector('input[name=fit]:checked') || {}).value === '1') ? 1 : 0,
-    transitionList: trans
+    transitionList: trans,
+    shuffle: $('chkShuffle').checked
   };
   return base;
 }
@@ -294,7 +301,9 @@ function openListModal(title, items, okText, onConfirm) {
     box.appendChild(row);
   });
   const ok = $('listOk');
+  ok.classList.remove('hidden');
   ok.textContent = okText || '确定';
+  $('listCancel').textContent = '取消';
   ok.onclick = async function () {
     const chosen = Array.prototype.slice.call(box.querySelectorAll('input:checked')).map(function (c) { return c.value; });
     $('listModal').classList.add('hidden');
@@ -304,6 +313,44 @@ function openListModal(title, items, okText, onConfirm) {
 }
 
 // ---------------- 事件 ----------------
+
+/// 内核下载流程：先测速，再让用户自己挑源
+async function kernelFlow() {
+  toast('正在测速（各源试拉 256KB）…');
+  const r = await tryCall('speedtest_mirrors');
+  if (!r) return;
+  const rows = (r.results || []);
+  $('listTitle').textContent = '选择下载源 · v' + r.version;
+  const box = $('listBox');
+  box.innerHTML = '';
+  rows.forEach(function (it) {
+    const row = document.createElement('div');
+    row.className = 'list-item';
+    const btn = document.createElement('button');
+    btn.className = 'btn ' + (it.ok ? 'primary' : 'ghost');
+    btn.textContent = it.label;
+    btn.disabled = !it.ok;
+    btn.onclick = async function () {
+      $('listModal').classList.add('hidden');
+      const d = await tryCall('download_kernel', { prefer: it.url });
+      if (d) toast(d.message || '已开始下载', 'ok');
+    };
+    const info = document.createElement('span');
+    info.className = 'sub';
+    info.textContent = it.ok ? (fmtSize(Math.round((it.kbps || 0) * 1024)) + '/s · ' + it.ms + 'ms') : '不可用';
+    row.appendChild(btn);
+    row.appendChild(info);
+    box.appendChild(row);
+  });
+  const hint = document.createElement('div');
+  hint.className = 'li-note';
+  hint.style.padding = '8px 11px';
+  hint.textContent = '点一个源就开始下载（约 151MB，后台进行）。速度是刚才实测的，仅供参考。';
+  box.appendChild(hint);
+  $('listOk').classList.add('hidden');
+  $('listCancel').textContent = '取消';
+  $('listModal').classList.remove('hidden');
+}
 
 async function cleanupFlow() {
   const r = await tryCall('cleanup_candidates');
@@ -333,6 +380,7 @@ async function cleanupFlow() {
 
 function bind() {
   document.querySelectorAll('input[name=mode]').forEach(function (r) { r.addEventListener('change', applyModeUI); });
+  $('chkIdle').addEventListener('change', function () { $('numIdle').disabled = !$('chkIdle').checked; });
 
   $('btnSave').addEventListener('click', async function () {
     try {
@@ -362,15 +410,7 @@ function bind() {
   });
   $('btnCleanup').addEventListener('click', cleanupFlow);
 
-  $('btnKernel').addEventListener('click', async function () {
-    if (!confirm('将下载 Electron 新内核（约 151MB，解压后约 250MB）。\n\n' +
-      '用途：这是一个由本程序控制的浏览器内核，窗口属于我们，' +
-      '所以能注入「退出屏保」按钮、能接管 ESC —— 内置内核太旧打不开的网站，用它就能正常打开且随时退得出。\n\n' +
-      '下载源：GitHub 直连，失败自动走 gh-proxy 代理。后台进行，界面不卡。\n\n继续吗？')) return;
-    const r = await tryCall('download_kernel');
-    if (r) toast(r.message || '已开始下载', 'ok');
-  });
-
+  $('btnKernel').addEventListener('click', kernelFlow);
   $('btnPickFile').addEventListener('click', async function () {
     const ps = await pickPaths('single', 'web');
     if (ps.length) $('txtUrl').value = ps[0];
