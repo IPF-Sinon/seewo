@@ -18,14 +18,13 @@ use std::process::Command;
 
 const LOADER_JS: &str = include_str!("../../tools/payload/aura-screensaver-loader.js");
 const KERNEL_PS1: &str = include_str!("kernel_download.ps1");
-const PICK_PS1: &str = include_str!("pick.ps1");
 const KERNEL_MAIN_JS: &str = include_str!("../../tools/electron-app/main.js");
 const KERNEL_PKG_JSON: &str = include_str!("../../tools/electron-app/package.json");
 const SINGLE_INSTANCE_PORT: u16 = 37651;
 const MARKER: &str = "aura-screensaver-loader";
 const INJECT_ANCHOR: &str = "n.p=\"\",n(n.s=140)}([";
 const INJECT_REPLACE: &str = "n.p=\"\",global.__AURA_REQ__=n,n(n.s=140)}([";
-const CONFIG_VERSION: &str = "2.6.2";
+const CONFIG_VERSION: &str = "2.7.0";
 
 // ===================== asar =====================
 
@@ -518,31 +517,110 @@ fn iso_now() -> String {
 }
 
 
+// ===================== 文件 / 文件夹选择（Tauri dialog 插件，不经过 PowerShell） =====================
+
+/// 选文件 / 多选 / 选文件夹。
+/// 之前用「Rust 调 PowerShell 跑 WinForms 对话框」，有两个毛病：
+///   1) 中文路径乱码 —— PowerShell 把结果写到控制台用的是 OEM 码页，
+///      Rust 按 UTF-8 读回来就花了；
+///   2) 只能单选文件，选不了文件夹。
+/// 现在直接用 Tauri 官方 dialog 插件在 Rust 侧弹原生对话框，
+/// 返回标准 String，没有编码问题，也支持文件夹与多选。
 #[tauri::command]
-fn pick_file(title: Option<String>, filter: Option<String>) -> Result<Value, String> {
-    // 用 PowerShell 的原生 WinForms 对话框：不依赖 tauri-plugin-dialog，
-    // 也不需要前端打包 JS 绑定（withGlobalTauri 下插件的 JS 不保证存在）。
-    let mut p = std::env::temp_dir();
-    p.push("aura_pick_dialog.ps1");
-    fs::write(&p, PICK_PS1).map_err(|e| format!("写对话框脚本失败: {}", e))?;
-    let out = Command::new("powershell.exe")
-        .args(["-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File"])
-        .arg(&p)
-        .arg("-Title")
-        .arg(title.unwrap_or_else(|| "选择文件".to_string()))
-        .arg("-Filter")
-        .arg(filter.unwrap_or_else(|| "所有文件|*.*".to_string()))
-        .output()
-        .map_err(|e| format!("打开对话框失败: {}", e))?;
-    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if path.is_empty() {
-        return Ok(json!({ "path": Value::Null, "cancelled": true }));
+async fn pick_files(
+    app: tauri::AppHandle,
+    mode: Option<String>,
+    kind: Option<String>,
+) -> Result<Value, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let mode = mode.unwrap_or_else(|| "single".to_string());
+    let kind = kind.unwrap_or_else(|| "image".to_string());
+
+    let mut dlg = app.dialog().file().set_title(match mode.as_str() {
+        "folder" => "选择文件夹",
+        "multi" => "选择文件（可多选）",
+        _ => "选择文件",
+    });
+
+    dlg = match kind.as_str() {
+        "image" => dlg
+            .add_filter("图片/动图", &["jpg", "jpeg", "png", "bmp", "gif", "webp", "avif", "apng"])
+            .add_filter("所有文件", &["*"]),
+        "web" => dlg
+            .add_filter("网页或视频", &["html", "htm", "xhtml", "mht", "mhtml", "svg", "mp4", "webm", "ogv", "mov", "m4v"])
+            .add_filter("所有文件", &["*"]),
+        "exe" => dlg
+            .add_filter("可执行文件", &["exe"])
+            .add_filter("所有文件", &["*"]),
+        _ => dlg.add_filter("所有文件", &["*"]),
+    };
+
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<String>>();
+
+    match mode.as_str() {
+        "folder" => {
+            dlg.pick_folder(move |p| {
+                let v = p.map(|x| vec![x.to_string()]).unwrap_or_default();
+                let _ = tx.send(v);
+            });
+        }
+        "multi" => {
+            dlg.pick_files(move |p| {
+                let v = p
+                    .map(|xs| xs.into_iter().map(|x| x.to_string()).collect::<Vec<String>>())
+                    .unwrap_or_default();
+                let _ = tx.send(v);
+            });
+        }
+        _ => {
+            dlg.pick_file(move |p| {
+                let v = p.map(|x| vec![x.to_string()]).unwrap_or_default();
+                let _ = tx.send(v);
+            });
+        }
     }
-    Ok(json!({ "path": path, "cancelled": false }))
+
+    let paths = rx.recv().unwrap_or_default();
+    log_line("INFO", &format!("选择 {}：{} 项", mode, paths.len()));
+    Ok(json!({ "paths": paths, "cancelled": paths.is_empty() }))
 }
 
+/// 递归扫描文件夹里的图片（最多 4 层、500 张）
+#[tauri::command]
+fn scan_image_folder(path: String) -> Result<Value, String> {
+    let exts = ["jpg", "jpeg", "png", "bmp", "gif", "webp", "avif", "apng"];
+    let mut out: Vec<String> = Vec::new();
 
-/// 读取本地图片并返回 data URL（前端直接 <img src> 显示，避免 asset protocol 的路径授权问题）
+    fn walk(dir: &Path, exts: &[&str], out: &mut Vec<String>, depth: u32) {
+        if depth > 4 || out.len() >= 500 {
+            return;
+        }
+        let rd = match fs::read_dir(dir) {
+            Ok(x) => x,
+            Err(_) => return,
+        };
+        for e in rd.filter_map(|x| x.ok()) {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, exts, out, depth + 1);
+            } else if let Some(ext) = p.extension().and_then(|x| x.to_str()) {
+                if exts.contains(&ext.to_lowercase().as_str()) {
+                    out.push(p.to_string_lossy().to_string());
+                }
+            }
+            if out.len() >= 500 {
+                return;
+            }
+        }
+    }
+
+    walk(Path::new(&path), &exts, &mut out, 0);
+    out.sort();
+    let n = out.len();
+    log_line("INFO", &format!("扫描文件夹得到 {} 张图片", n));
+    Ok(json!({ "files": out, "count": n }))
+}
+
 #[tauri::command]
 fn image_data_url(path: String) -> Result<Value, String> {
     let p = PathBuf::from(&path);
@@ -1335,6 +1413,7 @@ fn main() {
     let listener = listener.expect("listener");
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
             // 已有实例被再次启动时，把窗口拉到前台
             let handle = app.handle().clone();
@@ -1373,7 +1452,8 @@ fn main() {
             cleanup_candidates,
             do_cleanup,
             reboot,
-            pick_file,
+            pick_files,
+            scan_image_folder,
             image_data_url,
             prepare_safe_mode,
             open_safe_dir,

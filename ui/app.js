@@ -25,11 +25,12 @@ async function tryCall(cmd, args) {
   try { return await call(cmd, args); }
   catch (e) { toast(typeof e === 'string' ? e : (e && e.message) || '操作失败', 'err'); return null; }
 }
-async function pickFile(filter) {
+// 统一封装：mode = single | multi | folder，kind = image | web | exe
+async function pickPaths(mode, kind) {
   try {
-    const r = await call('pick_file', { title: '选择文件', filter: filter });
-    return r && r.path ? r.path : null;
-  } catch (e) { toast('打开对话框失败，请直接粘贴完整路径', 'err'); return null; }
+    const r = await call('pick_files', { mode: mode, kind: kind });
+    return (r && r.paths) || [];
+  } catch (e) { toast('打开对话框失败：' + (e && e.message || e), 'err'); return []; }
 }
 function fmtSize(n) {
   if (!n) return '0 B';
@@ -345,19 +346,45 @@ function bind() {
   });
 
   $('btnPickFile').addEventListener('click', async function () {
-    const p = await pickFile('网页或视频|*.html;*.htm;*.xhtml;*.mht;*.mhtml;*.svg;*.mp4;*.webm;*.ogv;*.mov;*.m4v|所有文件|*.*');
-    if (p) $('txtUrl').value = p;
+    const ps = await pickPaths('single', 'web');
+    if (ps.length) $('txtUrl').value = ps[0];
   });
   $('btnPickBrowser').addEventListener('click', async function () {
-    const p = await pickFile('浏览器程序|*.exe|所有文件|*.*');
-    if (p) $('txtBrowserPath').value = p;
+    const ps = await pickPaths('single', 'exe');
+    if (ps.length) $('txtBrowserPath').value = ps[0];
   });
+  // 追加图片路径（自动去重）
+  function appendImages(paths) {
+    if (!paths || !paths.length) return 0;
+    const lines = $('txtImages').value.split('\n').map(function (x) { return x.trim(); }).filter(Boolean);
+    const seen = {};
+    lines.forEach(function (p) { seen[p.toLowerCase()] = 1; });
+    let added = 0;
+    paths.forEach(function (p) {
+      if (p && !seen[p.toLowerCase()]) { seen[p.toLowerCase()] = 1; lines.push(p); added++; }
+    });
+    $('txtImages').value = lines.join('\n');
+    return added;
+  }
+
   $('btnPickImages').addEventListener('click', async function () {
-    const p = await pickFile('图片/动图|*.jpg;*.jpeg;*.png;*.bmp;*.gif;*.webp;*.avif|所有文件|*.*');
-    if (p) {
-      const cur = $('txtImages').value.trim();
-      $('txtImages').value = cur ? (cur + '\n' + p) : p;
+    const ps = await pickPaths('multi', 'image');
+    if (!ps.length) return;
+    const n = appendImages(ps);
+    toast('已添加 ' + n + ' 张' + (ps.length > n ? ('，跳过 ' + (ps.length - n) + ' 张重复') : ''), 'ok');
+  });
+
+  $('btnPickFolder').addEventListener('click', async function () {
+    const ds = await pickPaths('folder', 'image');
+    if (!ds.length) return;
+    const r = await tryCall('scan_image_folder', { path: ds[0] });
+    if (!r) return;
+    if (!r.count) {
+      toast('这个文件夹里没找到图片', 'err');
+      return;
     }
+    const n = appendImages(r.files);
+    toast('扫描到 ' + r.count + ' 张，新增 ' + n + ' 张' + (r.count >= 500 ? '（已达 500 张上限）' : ''), 'ok');
   });
   $('btnPreviewImages').addEventListener('click', function () {
     const paths = $('txtImages').value.split('\n').map(function (x) { return x.trim(); }).filter(Boolean);
