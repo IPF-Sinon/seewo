@@ -29,8 +29,18 @@ async function tryCall(cmd, args) {
 //   于是「弹窗还没点确认，代码就已经走下去了」——
 //   用户反馈的「提权弹窗还没点确认就提权完成」就是这个原因。
 async function askDialog(message) {
-  const r = await tryCall('ask_dialog', { title: '请确认', message: String(message) });
-  return r === true;
+  // 拿不到明确结果时一律按「取消」处理（安全方向）：
+  // 宁可什么都不做，也绝不能悄悄替用户点头。
+  try {
+    const r = await tryCall('ask_dialog', { title: '请确认', message: String(message) });
+    if (r === true) return true;
+    if (r === false) return false;
+    await alertBox('确认对话框返回了异常结果，已按「取消」处理。');
+    return false;
+  } catch (e) {
+    await alertBox('确认对话框调用失败，已按「取消」处理：' + (e && e.message || e));
+    return false;
+  }
 }
 async function alertBox(message) {
   await tryCall('alert_dialog', { title: '提示', message: String(message) });

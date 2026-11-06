@@ -23,7 +23,7 @@ const SINGLE_INSTANCE_PORT: u16 = 37651;
 const MARKER: &str = "aura-screensaver-loader";
 const INJECT_ANCHOR: &str = "n.p=\"\",n(n.s=140)}([";
 const INJECT_REPLACE: &str = "n.p=\"\",global.__AURA_REQ__=n,n(n.s=140)}([";
-const CONFIG_VERSION: &str = "3.3.3";
+const CONFIG_VERSION: &str = "3.3.4";
 
 // ===================== asar =====================
 
@@ -1229,8 +1229,13 @@ fn check_upgrade() -> Result<Value, String> {
 ///   Tauri 的 WebView2 对脚本对话框不做处理时会**直接当成确定**，
 ///   于是「确认框还没弹/还没点，代码就已经走下去了」——
 ///   用户反馈的「提权弹窗还没点确认就提权完成」就是这个原因。
+///
+/// ★★ 必须是 async fn：Tauri 里**同步命令跑在主线程**，而 blocking_show()
+///    要把弹窗派发到主线程再等它，同步命令调用就会**死锁** ——
+///    表现为「弹窗不出现、invoke 也永不返回、点击毫无反应」。
+///    写成 async fn 会改到异步线程池上执行，就不会死锁。
 #[tauri::command]
-fn ask_dialog(app: tauri::AppHandle, title: String, message: String) -> Result<bool, String> {
+async fn ask_dialog(app: tauri::AppHandle, title: String, message: String) -> Result<bool, String> {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
     let ok = app
         .dialog()
@@ -1244,7 +1249,7 @@ fn ask_dialog(app: tauri::AppHandle, title: String, message: String) -> Result<b
 
 /// 原生提示对话框（只有一个确定）。
 #[tauri::command]
-fn alert_dialog(app: tauri::AppHandle, title: String, message: String) -> Result<(), String> {
+async fn alert_dialog(app: tauri::AppHandle, title: String, message: String) -> Result<(), String> {
     use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
     app.dialog()
         .message(message)
