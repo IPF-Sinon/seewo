@@ -23,7 +23,7 @@ const SINGLE_INSTANCE_PORT: u16 = 37651;
 const MARKER: &str = "aura-screensaver-loader";
 const INJECT_ANCHOR: &str = "n.p=\"\",n(n.s=140)}([";
 const INJECT_REPLACE: &str = "n.p=\"\",global.__AURA_REQ__=n,n(n.s=140)}([";
-const CONFIG_VERSION: &str = "3.3.0";
+const CONFIG_VERSION: &str = "3.3.1";
 
 // ===================== asar =====================
 
@@ -1243,7 +1243,6 @@ fn relaunch_as_admin() -> Result<Value, String> {
                 std::ptr::null_mut(),
                 op_w.as_ptr(),
                 exe_w.as_ptr(),
-                std::ptr::null(),
                 params_w.as_ptr(),
                 std::ptr::null(),
                 SW_SHOWNORMAL,
