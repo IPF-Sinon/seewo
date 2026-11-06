@@ -929,6 +929,52 @@
     }
   }
 
+  /**
+   * 按**可执行文件全路径**杀进程。
+   *
+   * 为什么需要它：日志实测「PID 文件里的进程已经不存在了」——
+   * 我们 spawm 出来的那个进程（chrome 的启动器 / electron 的引导进程）很快就退出了，
+   * 真正显示窗口的是另一个进程；句柄和 PID 都指不到它，
+   * profile 匹配对内核路径又为空。
+   * 而 exe 路径（chrome.exe / kernel\electron.exe）我们是**确定知道**的，
+   * 按 ExecutablePath 精确匹配最可靠。
+   */
+  function killByExePath(exePath, log) {
+    if (!exePath) { log.warn("按 exe 路径兜底：没有 exe 信息，跳过"); return false; }
+    try {
+      var fsk = require("fs");
+      var pathk = require("path");
+      var cp = require("child_process");
+      var dir = resolveDataFile(["seewo", "AuraScreensaver"]);
+      try { fsk.mkdirSync(dir, { recursive: true }); } catch (e) { }
+      var psFile = pathk.join(dir, "kill-by-path.ps1");
+      var lit = String(exePath).split(String.fromCharCode(39)).join(String.fromCharCode(39) + String.fromCharCode(39));
+      var Q2 = String.fromCharCode(39);
+      var script = [
+        "$target = " + Q2 + lit + Q2,
+        "$n = 0",
+        "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |",
+        "  Where-Object { $_.ExecutablePath -and $_.ExecutablePath -ieq $target } |",
+        "  ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop; $n++ } catch { } }",
+        "Write-Output (" + Q2 + "KILLED=" + Q2 + " + $n)",
+        "",
+      ].join(String.fromCharCode(10));
+      fsk.writeFileSync(psFile, script, "utf8");
+      var r = cp.spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", psFile],
+        { encoding: "utf8", timeout: 10000, windowsHide: true });
+      var txt = String((r && r.stdout) || "") + String((r && r.stderr) || "");
+      var mm = txt.match(/KILLED=([0-9]+)/);
+      if (mm) {
+        log.info("按 exe 路径兜底：杀掉 " + mm[1] + " 个进程（" + exePath + "）");
+        return Number(mm[1]) > 0;
+      }
+      log.warn("按 exe 路径兜底未确认结果: " + txt.slice(0, 160));
+      return false;
+    } catch (e) {
+      log.warn("按 exe 路径兜底失败: " + (e && e.message || e));
+      return false;
+    }
+  }
   function closeWebWindow(state, log) {
     try {
       // 先解绑全局快捷键，避免屏保关掉后 ESC 还被我们占着
@@ -970,7 +1016,8 @@
               }
             }
             try { fsv2.unlinkSync(pf2); } catch (e2) { }
-            if (!killed) { killBrowserByProfile(state && state.webProfile, log); }
+            if (!killed) { killed = killBrowserByProfile(state && state.webProfile, log); }
+            if (!killed) { killByExePath(state && state.webExe, log); }
           } else {
             if (!killBrowserByProfile(state && state.webProfile, log)) {
               log.warn('关闭网页屏保：句柄 / PID / profile 三种方式都没能关闭外部浏览器');
@@ -1432,6 +1479,7 @@
         ];
       }
       state.webProfile = profile;
+      state.webExe = exe;
       var child = cp.spawn(exe, args, { detached: false, stdio: 'ignore' });
       state.webProc = child;
       // ★ 记下 PID：即使进程句柄丢了（被系统回收、或启动器进程提前退出），

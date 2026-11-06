@@ -500,38 +500,42 @@ function bind() {
 async function safeFlow(action) {
   const what = action === 'uninstall' ? '卸载还原' : '安装注入';
 
-  if (STATE && STATE.isAdmin === false) {
-    if (!confirm('需要管理员权限，确定要以管理员身份重新启动吗？')) return;
-    const r0 = await tryCall('relaunch_as_admin');
-    if (r0) toast('已请求提权，请在新窗口里再点一次', 'ok');
-    return;
-  }
-
-  const r = await tryCall('enter_safe_mode', { action: action });
-  if (!r) return;
-  if (r.ranNow) { toast(r.message || '已完成', 'ok'); await refresh(); return; }
-
+  // 1) 先确认（此时还没做任何改动）
   const lines = [];
   lines.push('将要重启进入安全模式来完成' + what + '。');
   lines.push('');
   lines.push('【重要】安全模式下本程序的界面打不开');
   lines.push('（Tauri 依赖 WebView2，而安全模式加载不了它）。');
   lines.push('');
-  lines.push('所以重启前会在桌面生成一个「安全模式-点我.bat」，');
+  lines.push('重启前会在桌面生成一个「安全模式-点我.bat」，');
   lines.push('重启后双击它、菜单选 1 即可完成，然后自动重启回正常。');
   lines.push('');
-  lines.push('现在重启电脑吗？（5 秒后重启，请先保存其它工作）');
+  lines.push('现在开始吗？（之后电脑会在 5 秒后重启）');
 
   if (!confirm(lines.join(String.fromCharCode(10)))) {
     toast('已取消，未做任何改动', 'ok');
     return;
   }
 
+  // 2) 非管理员：先请求提权（清单是 asInvoker，启动不弹 UAC）
+  if (STATE && STATE.isAdmin === false) {
+    const r0 = await tryCall('relaunch_as_admin');
+    if (r0) toast('已请求以管理员身份重启，请在新窗口里再操作一次', 'ok');
+    return;
+  }
+
+  // 3) 确认之后才真正动手：设安全模式 + 写脚本
+  const r = await tryCall('enter_safe_mode', { action: action });
+  if (!r) return;
+  if (r.ranNow) { toast(r.message || '已完成', 'ok'); await refresh(); return; }
+
   const prep = await tryCall('prepare_safe_mode');
   if (prep && prep.files) {
     const desk = prep.files.filter(function (x) { return x.indexOf('Desktop') >= 0 || x.indexOf('桌面') >= 0; });
-    toast(desk.length ? ('已生成桌面批处理：' + desk[0].replace(/^.*[\/]/, '')) : '已生成安全模式脚本', 'ok');
+    if (desk.length) toast('已在桌面生成：' + desk[0].replace(/^.*[\/]/, ''), 'ok');
   }
+
+  // 4) 最后才重启
   const rr = await tryCall('reboot');
   if (rr) toast('电脑将在 5 秒后重启，重启后双击桌面「安全模式-点我.bat」并选 1', 'ok');
 }

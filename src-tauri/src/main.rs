@@ -23,7 +23,7 @@ const SINGLE_INSTANCE_PORT: u16 = 37651;
 const MARKER: &str = "aura-screensaver-loader";
 const INJECT_ANCHOR: &str = "n.p=\"\",n(n.s=140)}([";
 const INJECT_REPLACE: &str = "n.p=\"\",global.__AURA_REQ__=n,n(n.s=140)}([";
-const CONFIG_VERSION: &str = "3.2.0";
+const CONFIG_VERSION: &str = "3.3.0";
 
 // ===================== asar =====================
 
@@ -847,8 +847,8 @@ fn enter_safe_mode(action: String) -> Result<Value, String> {
     ensure_dir(&config_dir())?;
     fs::write(config_dir().join("pending-safe-action.txt"), &action)
         .map_err(|e| format!("写待办标记失败: {}", e))?;
-    // ★ 不在这里写脚本：用户还没确认要重启，先落盘桌面批处理属于「误触就有副作用」。
-    //   改由界面在确认之后调用 prepare_safe_mode。
+    // 界面已经改成「先确认、再调用本命令」，所以这里可以安全地落盘脚本。
+    let _safe = write_safe_scripts().unwrap_or_else(|_| json!({}));
     run_cmd("bcdedit.exe", &["/set", "{current}", "safeboot", "minimal"])
         .map_err(|e| format!("设置安全模式失败: {}", e))?;
     log_line("INFO", &format!("已设置安全模式，待办动作={}", action));
@@ -1234,12 +1234,17 @@ fn relaunch_as_admin() -> Result<Value, String> {
         let to_w = |t: &str| -> Vec<u16> { t.encode_utf16().chain(std::iter::once(0)).collect() };
         let exe_w = to_w(&exe.to_string_lossy());
         let op_w = to_w("runas");
+        // 传 --elevated：新实例要跳过单实例检查。
+        // 否则它会连上我们这个实例的端口然后自己退出 ——
+        // 表现就是「点了确认提权没反应」。
+        let params_w = to_w("--elevated");
         let r = unsafe {
             ShellExecuteW(
                 std::ptr::null_mut(),
                 op_w.as_ptr(),
                 exe_w.as_ptr(),
                 std::ptr::null(),
+                params_w.as_ptr(),
                 std::ptr::null(),
                 SW_SHOWNORMAL,
             )
@@ -1248,7 +1253,12 @@ fn relaunch_as_admin() -> Result<Value, String> {
             return Err("提权被取消或失败".to_string());
         }
         log_line("INFO", "已请求以管理员身份重新启动");
-        return Ok(json!({ "ok": true, "message": "已以管理员身份重新启动，请在新窗口继续" }));
+        // 当前实例必须让路：释放单实例端口，否则提权后的新实例起不来
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            std::process::exit(0);
+        });
+        return Ok(json!({ "ok": true, "message": "已以管理员身份重新启动" }));
     }
     #[cfg(not(windows))]
     {
@@ -1636,6 +1646,8 @@ fn main() {
     let argv: Vec<String> = std::env::args().collect();
     let has = |k: &str| argv.iter().any(|a| a == k);
 
+    let elevated_boot = has("--elevated");
+
     if has("--prepare-safe")
         || has("--safe-action")
         || has("--safe-install")
@@ -1649,7 +1661,9 @@ fn main() {
         out.push_str("希沃屏保配置 · 命令行模式（不依赖 WebView2，安全模式下可用）\r\n");
         out.push_str(&format!("版本 {}   管理员: {}\r\n\r\n", CONFIG_VERSION, is_admin()));
 
-        if has("--prepare-safe") {
+        let elevated_boot = has("--elevated");
+
+    if has("--prepare-safe") {
             match write_safe_scripts() {
                 Ok(v) => {
                     out.push_str("已生成安全模式脚本：\r\n");
@@ -1734,7 +1748,12 @@ fn main() {
     }
     // ---- 单实例：用一个本地端口当锁 ----
     // 第二个实例连得上就说明已有实例，请它把窗口带到前台后自己退出。
-    let listener = std::net::TcpListener::bind(("127.0.0.1", SINGLE_INSTANCE_PORT)).ok();
+    // 提权重启的实例要跳过单实例锁，否则会被原实例挡下来直接退出
+    let listener = if elevated_boot {
+        std::net::TcpListener::bind(("127.0.0.1", 0)).ok()
+    } else {
+        std::net::TcpListener::bind(("127.0.0.1", SINGLE_INSTANCE_PORT)).ok()
+    };
     if listener.is_none() {
         use std::io::Write;
         if let Ok(mut s) = std::net::TcpStream::connect(("127.0.0.1", SINGLE_INSTANCE_PORT)) {
