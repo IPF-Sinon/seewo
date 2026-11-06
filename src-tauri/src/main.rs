@@ -23,7 +23,7 @@ const SINGLE_INSTANCE_PORT: u16 = 37651;
 const MARKER: &str = "aura-screensaver-loader";
 const INJECT_ANCHOR: &str = "n.p=\"\",n(n.s=140)}([";
 const INJECT_REPLACE: &str = "n.p=\"\",global.__AURA_REQ__=n,n(n.s=140)}([";
-const CONFIG_VERSION: &str = "3.3.2";
+const CONFIG_VERSION: &str = "3.3.3";
 
 // ===================== asar =====================
 
@@ -1223,6 +1223,36 @@ fn check_upgrade() -> Result<Value, String> {
 
 /// 列出本程序制造的所有可清理文件，并说明用途。
 /// 只列「删了不影响功能」的东西；配置文件本身不列（那是用户的设置）。
+/// 原生「确定 / 取消」对话框。
+///
+/// ★ 必须用它，不能用网页里的 window.confirm：
+///   Tauri 的 WebView2 对脚本对话框不做处理时会**直接当成确定**，
+///   于是「确认框还没弹/还没点，代码就已经走下去了」——
+///   用户反馈的「提权弹窗还没点确认就提权完成」就是这个原因。
+#[tauri::command]
+fn ask_dialog(app: tauri::AppHandle, title: String, message: String) -> Result<bool, String> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    let ok = app
+        .dialog()
+        .message(message)
+        .title(title)
+        .kind(MessageDialogKind::Info)
+        .buttons(MessageDialogButtons::OkCancel)
+        .blocking_show();
+    Ok(ok)
+}
+
+/// 原生提示对话框（只有一个确定）。
+#[tauri::command]
+fn alert_dialog(app: tauri::AppHandle, title: String, message: String) -> Result<(), String> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+    app.dialog()
+        .message(message)
+        .title(title)
+        .kind(MessageDialogKind::Info)
+        .blocking_show();
+    Ok(())
+}
 #[tauri::command]
 fn relaunch_as_admin() -> Result<Value, String> {
     // 只在需要的时候提权（点安装 / 安全模式），而不是启动就弹 UAC。
@@ -1800,6 +1830,8 @@ fn main() {
             download_kernel,
             speedtest_mirrors,
             relaunch_as_admin,
+            ask_dialog,
+            alert_dialog,
             check_upgrade,
             cleanup_candidates,
             do_cleanup,

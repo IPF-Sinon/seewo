@@ -24,6 +24,17 @@ async function call(cmd, args) { return await invoke(cmd, args || {}); }
 async function tryCall(cmd, args) {
   try { return await call(cmd, args); }
   catch (e) { toast(typeof e === 'string' ? e : (e && e.message) || '操作失败', 'err'); return null; }
+// ★ 必须用 Tauri 原生对话框，不能用 window.confirm / window.alert：
+//   Tauri 的 WebView2 对脚本对话框不处理时会**直接当成确定**，
+//   于是「弹窗还没点确认，代码就已经走下去了」——
+//   用户反馈的「提权弹窗还没点确认就提权完成」就是这个原因。
+async function askDialog(message) {
+  const r = await tryCall('ask_dialog', { title: '请确认', message: String(message) });
+  return r === true;
+}
+async function alertBox(message) {
+  await tryCall('alert_dialog', { title: '提示', message: String(message) });
+}
 }
 // 统一封装：mode = single | multi | folder，kind = image | web | exe
 async function pickPaths(mode, kind) {
@@ -414,8 +425,8 @@ function bind() {
   });
 
   $('btnPatch').addEventListener('click', function () { safeFlow('install'); });
-  $('btnUnpatch').addEventListener('click', function () {
-    if (confirm('确定还原成官方版本吗？自定义屏保会失效（图片配置仍保留）。')) safeFlow('uninstall');
+  $('btnUnpatch').addEventListener('click', async function () {
+    if (await askDialog('确定还原成官方版本吗？自定义屏保会失效（图片配置仍保留）。')) safeFlow('uninstall');
   });
   $('btnDiag').addEventListener('click', async function () {
     const s = await tryCall('diagnostics');
@@ -503,7 +514,7 @@ async function safeFlow(action) {
   // 1) 先处理提权。放在最前面：提权会重启程序，
   //    如果先让用户确认再重启，用户就得确认两次，很混乱。
   if (STATE && STATE.isAdmin === false) {
-    if (!confirm('需要管理员权限。现在以管理员身份重新启动吗？')) {
+    if (!await askDialog('需要管理员权限。现在以管理员身份重新启动吗？')) {
       toast('已取消，未做任何改动', 'ok');
       return;
     }
@@ -525,7 +536,7 @@ async function safeFlow(action) {
   lines.push('确认后才会：设安全模式 -> 写桌面脚本 -> 重启。');
   lines.push('现在继续吗？');
 
-  if (!confirm(lines.join(String.fromCharCode(10)))) {
+  if (!await askDialog(lines.join(String.fromCharCode(10)))) {
     toast('已取消，未做任何改动', 'ok');
     return;
   }
@@ -596,7 +607,7 @@ async function boot() {
   try {
     const p = await call('is_pending_safe_action');
     if (p && p.pending) {
-      if (confirm('检测到待办动作「' + p.action + '」。\n\n现在执行吗？（完成后会自动关闭安全模式）')) {
+      if (await askDialog('检测到待办动作「' + p.action + '」。\n\n现在执行吗？（完成后会自动关闭安全模式）')) {
         const r = await tryCall('run_pending_safe_action');
         if (r) { toast('已完成', 'ok'); await refresh(); }
       }
