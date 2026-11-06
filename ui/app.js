@@ -500,9 +500,21 @@ function bind() {
 async function safeFlow(action) {
   const what = action === 'uninstall' ? '卸载还原' : '安装注入';
 
-  // 1) 先确认（此时还没做任何改动）
+  // 1) 先处理提权。放在最前面：提权会重启程序，
+  //    如果先让用户确认再重启，用户就得确认两次，很混乱。
+  if (STATE && STATE.isAdmin === false) {
+    if (!confirm('需要管理员权限。现在以管理员身份重新启动吗？')) {
+      toast('已取消，未做任何改动', 'ok');
+      return;
+    }
+    const r0 = await tryCall('relaunch_as_admin');
+    if (r0) toast('已请求以管理员身份重启，请在新窗口里再操作一次', 'ok');
+    return;
+  }
+
+  // 2) 确认。此时还没做任何改动，取消就是真的没动过。
   const lines = [];
-  lines.push('将要重启进入安全模式来完成' + what + '。');
+  lines.push('将以管理员身份重启进入安全模式来完成' + what + '。');
   lines.push('');
   lines.push('【重要】安全模式下本程序的界面打不开');
   lines.push('（Tauri 依赖 WebView2，而安全模式加载不了它）。');
@@ -510,21 +522,15 @@ async function safeFlow(action) {
   lines.push('重启前会在桌面生成一个「安全模式-点我.bat」，');
   lines.push('重启后双击它、菜单选 1 即可完成，然后自动重启回正常。');
   lines.push('');
-  lines.push('现在开始吗？（之后电脑会在 5 秒后重启）');
+  lines.push('确认后才会：设安全模式 -> 写桌面脚本 -> 重启。');
+  lines.push('现在继续吗？');
 
   if (!confirm(lines.join(String.fromCharCode(10)))) {
     toast('已取消，未做任何改动', 'ok');
     return;
   }
 
-  // 2) 非管理员：先请求提权（清单是 asInvoker，启动不弹 UAC）
-  if (STATE && STATE.isAdmin === false) {
-    const r0 = await tryCall('relaunch_as_admin');
-    if (r0) toast('已请求以管理员身份重启，请在新窗口里再操作一次', 'ok');
-    return;
-  }
-
-  // 3) 确认之后才真正动手：设安全模式 + 写脚本
+  // 3) 确认之后才真正动手：设安全模式 + 写桌面脚本
   const r = await tryCall('enter_safe_mode', { action: action });
   if (!r) return;
   if (r.ranNow) { toast(r.message || '已完成', 'ok'); await refresh(); return; }
